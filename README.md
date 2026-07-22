@@ -64,7 +64,7 @@ py -3.13 rl/evaluate_rl.py --trajectory datasets/trajectories/target_trajectory_
 | `lego_car_with_pencil.xml` | **Core:** simulated car + paper model (199 × 137 mm) |
 | `record_trajectory.py`, `coordinate_plane.py`, `webapp.py` | Phase 1: camera tracking + ArUco homography + integrated capture |
 | `run_lego_signature.py` | Real-robot drive, **open-loop** dead reckoning from a trajectory |
-| `drive_closed_loop.py` | Real-robot drive, **closed-loop** (overhead-camera tip position + IMU heading), pure pursuit in paper mm |
+| `drive_closed_loop.py` | Real-robot drive, **closed-loop** (overhead-camera tip position + IMU heading), pure pursuit in paper mm — see [docs/closed_loop_pure_pursuit.md](docs/closed_loop_pure_pursuit.md) |
 | `lelib.py`, `motor_dashboard.py` | LEGO hardware wrapper, motor-tuning dashboard |
 | `view_trajectory.py`, `trajectory_io.py` | Trajectory plotting and `.npz` IO |
 | `learning/` | Phases 2–3: behaviour cloning (model, data collection, training, eval) |
