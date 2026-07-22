@@ -63,11 +63,16 @@ py -3.13 rl/evaluate_rl.py --trajectory datasets/trajectories/target_trajectory_
 | `track_trajectory.py` | **Core:** MuJoCo sim + pure-pursuit controller (imported everywhere) |
 | `lego_car_with_pencil.xml` | **Core:** simulated car + paper model (199 × 137 mm) |
 | `record_trajectory.py`, `coordinate_plane.py`, `webapp.py` | Phase 1: camera tracking + ArUco homography + integrated capture |
-| `run_lego_signature.py`, `lelib.py`, `motor_dashboard.py` | Real-robot drive, hardware wrapper, motor-tuning dashboard |
+| `run_lego_signature.py` | Real-robot drive, **open-loop** dead reckoning from a trajectory |
+| `drive_closed_loop.py` | Real-robot drive, **closed-loop** (overhead-camera tip position + IMU heading), pure pursuit in paper mm |
+| `lelib.py`, `motor_dashboard.py` | LEGO hardware wrapper, motor-tuning dashboard |
 | `view_trajectory.py`, `trajectory_io.py` | Trajectory plotting and `.npz` IO |
 | `learning/` | Phases 2–3: behaviour cloning (model, data collection, training, eval) |
 | `rl/` | Phase 4: Gymnasium env, PPO training, evaluation, deploy, mjlab port |
-| `datasets/`, `models/` | Recorded trajectories/plots and trained policies |
+| `models/` | Trained policies (`bc_policy.pt`, `rl_policy.zip`) |
+| `datasets/trajectories/`, `datasets/plots/` | Raw recordings: trainable `.npz` + `.png` visualizations |
+| `datasets/sim_traces/` | `track_trajectory.py` sim outputs: traced path `.npz` + verification `.png` |
+| `datasets/closedloop_traces/` | `drive_closed_loop.py` outputs: per-tick log `.npz` + target-vs-actual trace `.png` |
 
 ## Key design notes
 

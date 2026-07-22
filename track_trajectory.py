@@ -39,6 +39,9 @@ import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "lego_car_with_pencil.xml")
+# Simulation outputs (actual traced path .npz + verification .png) live here,
+# parallel to datasets/trajectories and datasets/plots for the raw recordings.
+SIM_TRACE_DIR = os.path.join(BASE_DIR, "datasets", "sim_traces")
 
 # Physical sheet size, must match coordinate_plane.py. The paper geom in the
 # MuJoCo model is centered at the world origin, so paper-mm (0,0) (the ID0
@@ -559,11 +562,12 @@ def main():
     tip_history = tracker.tip_history_array()
 
     timestamp = os.path.splitext(os.path.basename(trajectory_path))[0]
-    out_npz = os.path.join(BASE_DIR, f"sim_traced_{timestamp}.npz")
+    os.makedirs(SIM_TRACE_DIR, exist_ok=True)
+    out_npz = os.path.join(SIM_TRACE_DIR, f"sim_traced_{timestamp}.npz")
     np.savez(out_npz, actual_trajectory=tip_history, target_world=path_world)
     print(f"Saved actual traced trajectory to {out_npz}")
 
-    out_png = args.output or os.path.join(BASE_DIR, f"sim_traced_{timestamp}.png")
+    out_png = args.output or os.path.join(SIM_TRACE_DIR, f"sim_traced_{timestamp}.png")
     errors_mm = plot_comparison(path_world, tip_history, out_png, show=args.show)
     print(f"Tracking error (mm): max={errors_mm.max():.2f}  mean={errors_mm.mean():.2f}  "
           f"rms={np.sqrt(np.mean(errors_mm ** 2)):.2f}")

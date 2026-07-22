@@ -14,6 +14,8 @@ bc_eval_*.png
 rl_eval_*.npz
 rl_eval_*.png
 drive_log_*.npz
+closedloop_log_*.npz
+closedloop_trace_*.png
 tape_*.npz
 *_training_curves.png
 
