@@ -1,0 +1,55 @@
+<mujoco model="lego_car">
+  <!--
+    mjlab ENTITY version of lego_car_with_pencil.xml: the car only, no
+    floor/paper/light/skybox (mjlab provides the terrain plane; static
+    worldbody geoms would render once at the global origin rather than
+    per-env, because mjlab batches one model across many worlds).
+
+    Differences from the original model, kept deliberately minimal:
+      - free joint is named (mjlab wants at most one, name optional but nice)
+      - actuators are NOT crossed (motor_left -> joint_left): the crossing in
+        the original file mirrors the physical robot's wiring, which is
+        irrelevant here and would only confuse per-wheel action indexing.
+    All masses, inertias, frictions and gears match the original file.
+  -->
+
+  <worldbody>
+    <body name="chassis" pos="0 0 0.02">
+      <freejoint name="root"/>
+      <inertial pos="0 0 -0.013" mass="0.15" diaginertia="1.3e-5 3.0e-5 3.6e-5"/>
+      <geom type="box" size="0.04 0.024 0.015" rgba=".4 .75 1.0 1"/>
+
+      <body name="wheel_left" pos="-0.024 -0.036 0">
+        <joint name="joint_left" type="hinge" axis="0 1 0" damping="0.005"/>
+        <inertial pos="0 0 0" mass="0.02" diaginertia="2.2e-6 4.0e-6 2.2e-6"/>
+        <geom type="cylinder" size="0.02 0.005" euler="90 0 0" rgba=".2 .2 .2 1"
+              friction="1.5 0.005 0.0001" condim="6" priority="1"/>
+      </body>
+
+      <body name="wheel_right" pos="-0.024 0.036 0">
+        <joint name="joint_right" type="hinge" axis="0 1 0" damping="0.005"/>
+        <inertial pos="0 0 0" mass="0.02" diaginertia="2.2e-6 4.0e-6 2.2e-6"/>
+        <geom type="cylinder" size="0.02 0.005" euler="90 0 0" rgba=".2 .2 .2 1"
+              friction="1.5 0.005 0.0001" condim="6" priority="1"/>
+      </body>
+
+      <geom name="front_skid" type="sphere" size="0.008" pos="0.032 0 -0.012"
+            rgba=".9 .9 .9 1" friction="0.1 0.005 0.0001" priority="1"/>
+
+      <body name="pencil" pos="-0.073 0 0.170">
+        <inertial pos="0 0 -0.091" mass="0.006" diaginertia="1.7e-5 1.7e-5 5e-8"/>
+        <geom name="pencil_barrel" type="cylinder" size="0.004 0.091"
+              pos="0 0 -0.091" rgba=".95 .9 .2 1"/>
+        <geom name="pencil_tip" type="sphere" size="0.004"
+              pos="0 0 -0.186" rgba="0 0 0 1"
+              friction="0.05 0.001 0.0001" priority="1"/>
+        <site name="pencil_trace" pos="0 0 -0.190" size="0.002" rgba="0 0 0 1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="motor_left"  joint="joint_left"  gear="0.05"/>
+    <motor name="motor_right" joint="joint_right" gear="0.05"/>
+  </actuator>
+</mujoco>

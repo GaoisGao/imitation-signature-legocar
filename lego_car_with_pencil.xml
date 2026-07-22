@@ -1,0 +1,105 @@
+<mujoco model="lego_car_with_pencil">
+
+  <!-- TUNE: simulation timestep (s) — smaller = more accurate, slower -->
+  <option timestep="0.002"/>
+
+  <default>
+    <geom rgba=".4 .75 1.0 1"/>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="1 1 1" rgb2=".6 .8 1" width="256" height="256"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1" dir="0 0 -1" diffuse="1 1 1"/>
+
+    <!-- Darker than the white paper/skybox so the paper is visible against it in renders.
+         TUNE: floor friction="sliding torsional rolling" -->
+    <geom name="floor" type="plane" size="1 1 0.01" rgba=".35 .35 .38 1"
+          friction="1 0.005 0.0001"/>
+
+    <!-- Paper surface: matches the printed ArUco calibration sheet (coordinate_plane.py),
+         199mm x 137mm, resting on top of the floor.
+         TUNE: paper friction="sliding torsional rolling" -->
+    <geom name="paper" type="box" size="0.0995 0.0685 0.0005" pos="0 0 0.0005"
+          rgba="1 1 1 1" friction="0.3 0.002 0.0001"/>
+
+    <!-- free joint lets the chassis move in 3-D -->
+    <body name="chassis" pos="0 0 0.02">
+      <joint type="free"/>
+
+      <!-- TUNE: chassis inertial — pos=COM offset, mass (kg), diaginertia Ixx Iyy Izz (kg·m²)
+           Ixx=roll resistance  Iyy=pitch resistance  Izz=yaw resistance -->
+      <inertial pos="0 0 -0.013" mass="0.15" diaginertia="1.3e-5 3.0e-5 3.6e-5"/>
+
+      <geom type="box" size="0.04 0.024 0.015"/>
+
+      <!-- TUNE: wheel damping (N·m·s/rad) — higher = more braking when unpowered
+           TUNE: wheel friction="sliding torsional rolling" — raise sliding for more traction
+           condim=6 activates the torsional+rolling friction terms above (condim=3 would ignore them)
+           priority=1 makes the wheel's own friction win contacts against paper/floor, instead of
+           MuJoCo's default elementwise-max combining rule -->
+      <body name="wheel_left" pos="-0.024 -0.036 0">
+        <joint name="joint_left" type="hinge" axis="0 1 0" damping="0.005"/>
+        <!-- TUNE: wheel mass (kg) and inertia (kg·m²) -->
+        <inertial pos="0 0 0" mass="0.02" diaginertia="2.2e-6 4.0e-6 2.2e-6"/>
+        <geom type="cylinder" size="0.02 0.005" euler="90 0 0" rgba=".2 .2 .2 1"
+              friction="1.5 0.005 0.0001" condim="6" priority="1"/>
+      </body>
+
+      <body name="wheel_right" pos="-0.024 0.036 0">
+        <joint name="joint_right" type="hinge" axis="0 1 0" damping="0.005"/>
+        <inertial pos="0 0 0" mass="0.02" diaginertia="2.2e-6 4.0e-6 2.2e-6"/>
+        <geom type="cylinder" size="0.02 0.005" euler="90 0 0" rgba=".2 .2 .2 1"
+              friction="1.5 0.005 0.0001" condim="6" priority="1"/>
+      </body>
+
+      <!-- TUNE: front skid friction — keep low so it slides freely
+           priority=1 so this low friction is used directly instead of being
+           overridden by the higher friction of whatever it's resting on -->
+      <geom name="front_skid" type="sphere" size="0.008" pos="0.032 0 -0.012"
+            rgba=".9 .9 .9 1" friction="0.1 0.005 0.0001" priority="1"/>
+
+      <!--
+        Pencil assembly — welded (no joint) to chassis.
+        Rear face of chassis box at chassis-local x=-0.04m; pencil offset 33mm behind:
+          pencil x = -0.04 - 0.033 = -0.073m
+
+        Total length = 190mm (contact point to top of barrel):
+          Barrel : cylinder r=4mm, L=182mm (half=91mm), spans z=0 to z=-0.182 in pencil-local
+          Tip    : sphere   r=4mm, centre z=-0.186, bottom z=-0.190 (contact point)
+
+        Vertical: sphere bottom at world z=0 → pencil origin at world z=0.190
+          chassis-local z = 0.190 - 0.020 = 0.170m
+      -->
+
+      <!-- TUNE: pencil mass (kg) and inertia — thin-rod approx: Ixx=Iyy=mL²/12, Izz=mr²/2
+           TUNE: pencil tip friction — keep very low for smooth tracing on floor/paper.
+           priority=1 forces this low friction to be used on contact, instead of being
+           overridden by the paper/floor's higher friction under MuJoCo's default max rule -->
+      <body name="pencil" pos="-0.073 0 0.170">
+        <inertial pos="0 0 -0.091" mass="0.006" diaginertia="1.7e-5 1.7e-5 5e-8"/>
+
+        <geom name="pencil_barrel" type="cylinder" size="0.004 0.091"
+              pos="0 0 -0.091" rgba=".95 .9 .2 1"/>
+
+        <geom name="pencil_tip" type="sphere" size="0.004"
+              pos="0 0 -0.186" rgba="0 0 0 1"
+              friction="0.05 0.001 0.0001" priority="1"/>
+
+        <!-- trace site at the exact ground-contact point of the pencil tip -->
+        <site name="pencil_trace" pos="0 0 -0.190" size="0.002" rgba="0 0 0 1"/>
+      </body>
+
+    </body>
+  </worldbody>
+
+  <!-- TUNE: gear = torque scale (N·m per unit control input) — higher = more speed/force
+       Joint mapping is intentionally crossed (differential-drive convention) -->
+  <actuator>
+    <motor name="motor_left"  joint="joint_right" gear="0.05"/>
+    <motor name="motor_right" joint="joint_left"  gear="0.05"/>
+  </actuator>
+
+</mujoco>

@@ -1,0 +1,27 @@
+# Core simulation + controller (Phase 1-2, always needed)
+numpy
+mujoco
+scipy
+
+# Phase 1 recording (camera + ArUco + web recorder)
+opencv-python
+flask
+
+# Phase 3 behaviour cloning
+torch
+
+# Phase 4 reinforcement learning (Stable-Baselines3 path)
+gymnasium
+stable-baselines3
+
+# Plotting / visualization
+matplotlib
+
+# --- Optional ---
+# mjlab RL port (rl/mjlab_port/): install separately, see https://github.com/mujocolab/mjlab
+#   mjlab
+#   rsl-rl-lib
+#   tensorboard
+#
+# Real-robot hardware (lelib.py, deploy): LEGO Education Python API
+#   legoeducation

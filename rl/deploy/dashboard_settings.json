@@ -1,0 +1,9 @@
+{
+  "card_serial": "2312",
+  "card_color": "",
+  "swap_motors": false,
+  "invert_left": false,
+  "invert_right": false,
+  "speed_scale": "0.5",
+  "countdown": "10"
+}
