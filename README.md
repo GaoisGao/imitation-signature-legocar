@@ -10,6 +10,17 @@ reinforcement-learning (RL) policy.
 > version before further testing and modification. Trained policies and a sample
 > signature are included so each phase runs out-of-the-box.
 
+## Closed-loop demo (real robot, overhead camera + IMU)
+
+The car tracing the same signature under closed-loop control (camera-measured
+pencil-tip position + IMU heading, in the paper mm frame). See
+[docs/closed_loop_pure_pursuit.md](docs/closed_loop_pure_pursuit.md) and
+[bc_vs_pure_pursuit.md](bc_vs_pure_pursuit.md).
+
+| Pure pursuit | BC policy |
+| --- | --- |
+| ![pure pursuit closed-loop trace](datasets/closedloop_traces/closedloop_purepursuit_20260722_174640.gif) | ![BC policy closed-loop trace](datasets/closedloop_traces/closedloop_bc_policy_20260722_174524.gif) |
+
 ## The pipeline
 
 1. **Record** — track a red pen tip under an overhead camera and map camera
@@ -73,6 +84,7 @@ py -3.13 rl/evaluate_rl.py --trajectory datasets/trajectories/target_trajectory_
 | `datasets/trajectories/`, `datasets/plots/` | Raw recordings: trainable `.npz` + `.png` visualizations |
 | `datasets/sim_traces/` | `track_trajectory.py` sim outputs: traced path `.npz` + verification `.png` |
 | `datasets/closedloop_traces/` | `drive_closed_loop.py` outputs: per-tick log `.npz` + target-vs-actual trace `.png` |
+| `datasets/bc_policy/` | `learning/evaluate_bc.py` outputs: BC eval trace `.npz` + BC-vs-expert `.png` |
 
 ## Key design notes
 

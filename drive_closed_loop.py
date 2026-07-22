@@ -50,6 +50,16 @@ Subcommands (run them in this order the first time):
   4. drive        The closed-loop run (auto-approaches the start by default).
                       py -3.13 drive_closed_loop.py drive --trajectory datasets/trajectories/target_trajectory_20260710_111912.npz --card-serial 2312 --card-color magenta
 
+Tracing with a trained policy instead of pure pursuit:
+  Pass --policy models/bc_policy.pt (behaviour cloning) or --policy
+  models/rl_policy.zip (RL). The policy replaces only the tracking control law;
+  the auto-approach still uses pure pursuit. Because the policies were trained
+  in the sim's METRE frame, the observation is converted mm->m at the boundary
+  (see policy_obs_m), the follower lookahead is fixed to the training value
+  (6mm), and the policy's m/s speed output is scaled back to mm/s (--speed is
+  then ignored). BC is a distillation of the pure-pursuit expert, so expect it
+  to roughly match, not beat, pure pursuit.
+
 Motor calibration (deg/s per 100%) is read from rl/deploy/motor_calibration.json;
 if it is missing, run `rl/deploy/openloop_deploy.py calibrate` first (or pass
 --degs-per-100pct). Wheel wiring flags (--swap-motors / --invert-left /
@@ -59,6 +69,7 @@ if it is missing, run `rl/deploy/openloop_deploy.py calibrate` first (or pass
 import argparse
 import json
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -99,6 +110,9 @@ INVERT_RIGHT_DEFAULT = True
 CONTROL_DT = 0.1               # s, control tick (matches BLE / openloop_deploy.py)
 DEFAULT_SPEED_MM_S = 30.0      # = sim DEFAULT_SPEED 0.03 m/s
 DEFAULT_LOOKAHEAD_MM = 12.0    # sim uses 6mm; larger is steadier on the slow 10Hz real loop
+# A trained BC/RL policy must see the SAME lookahead its observations were built
+# with (the sim's tt.DEFAULT_LOOKAHEAD = 6mm), or the obs are out of distribution.
+POLICY_LOOKAHEAD_MM = tt.DEFAULT_LOOKAHEAD * 1000.0
 DEFAULT_PATH_SPACING_MM = 2.0  # = sim 0.002 m
 DEFAULT_FINISH_TOL_MM = 5.0    # sim uses 3mm; a touch looser for the real robot
 DEFAULT_OFF_PATH_LIMIT_MM = 30.0   # abort if the tip strays this far from the path
@@ -165,6 +179,23 @@ def pure_pursuit_control(tip_mm, yaw_rad, follower, speed_mm_s, lookahead_mm,
     v = float(vx_local)
     omega = float(np.clip(vy_local / tip_offset_mm, -omega_max, omega_max))
     return v, omega, target, at_end, dist_to_final
+
+
+def policy_obs_m(tip_mm, yaw_rad, follower, path_mm):
+    """Build the 4-dim observation a trained BC/RL policy expects, in METRES:
+    [dx_local, dy_local, dist_to_final, at_end]. Identical to
+    track_trajectory.SignatureTracker._build_observation, but our tip/target are
+    in mm so the three length components are divided by 1000 (the policies were
+    trained in the sim's metre frame). Returns (obs_m, target_mm, at_end, dist_final_mm)."""
+    target, at_end = follower.get_target(tip_mm)
+    dist_final_mm = float(np.linalg.norm(path_mm[-1] - tip_mm))
+    dvec = target - tip_mm
+    c, s = np.cos(yaw_rad), np.sin(yaw_rad)
+    dx_local = c * dvec[0] + s * dvec[1]
+    dy_local = -s * dvec[0] + c * dvec[1]
+    obs_m = np.array([dx_local / 1000.0, dy_local / 1000.0,
+                      dist_final_mm / 1000.0, 1.0 if at_end else 0.0], dtype=np.float32)
+    return obs_m, target, at_end, dist_final_mm
 
 
 def vomega_to_wheel_degs(v_mm_s, omega, left_y_mm=WHEEL_LEFT_Y_MM,
@@ -262,6 +293,28 @@ def _draw_overlay(frame, H, path_mm, tip_mm=None, target_mm=None, status=""):
     return disp
 
 
+def _gif_frame(bgr, width):
+    """Downscale a BGR display frame to `width` px and convert to RGB for GIF."""
+    h, w = bgr.shape[:2]
+    if width and w > width:
+        bgr = cv2.resize(bgr, (int(width), int(round(h * width / w))),
+                         interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def _write_gif(frames_rgb, path, fps):
+    """Write RGB frames to an animated GIF via Pillow. Best-effort: never fatal."""
+    try:
+        from PIL import Image
+        imgs = [Image.fromarray(f) for f in frames_rgb]
+        dur = max(20, int(round(1000.0 / max(fps, 1e-6))))
+        imgs[0].save(path, save_all=True, append_images=imgs[1:],
+                     duration=dur, loop=0, optimize=True)
+        print(f"Saved GIF ({len(imgs)} frames) to {path}")
+    except Exception as exc:
+        print(f"(GIF save failed: {exc})")
+
+
 # -- hardware helpers (mirror rl/deploy/openloop_deploy.py) --------------------
 
 def _connect(args):
@@ -303,6 +356,40 @@ def _load_degs_per_100(args):
           f"{DEFAULT_DEGS_PER_100} deg/s per 100%. Run "
           f"`rl/deploy/openloop_deploy.py calibrate` for accuracy.")
     return DEFAULT_DEGS_PER_100
+
+
+def load_policy_controller(policy_path):
+    """Load a trained policy and return (controller_fn, kind_str). controller_fn
+    maps a METRE-frame obs (from policy_obs_m) -> (v m/s, omega rad/s):
+
+      * .pt  -> behaviour-cloning MLP (learning/bc_model.load_policy), applying
+               the training-time observation normalizer;
+      * .zip -> RL PPO policy (rl/signature_env.make_sb3_controller), applying
+               the fixed OBS_SCALE / ACTION_SCALE it was trained with.
+
+    Both were trained in the sim's metre frame, so the caller feeds metres and
+    scales the returned v back to mm/s."""
+    ext = os.path.splitext(policy_path)[1].lower()
+    if not os.path.exists(policy_path):
+        raise SystemExit(f"Policy file not found: {policy_path}")
+    if ext == ".pt":
+        sys.path.insert(0, os.path.join(BASE_DIR, "learning"))
+        import torch
+        from bc_model import load_policy
+        model, normalizer, cfg = load_policy(policy_path)
+
+        def controller(obs_m):
+            x = normalizer.transform(np.asarray(obs_m, np.float32)[None, :]).astype(np.float32)
+            with torch.no_grad():
+                a = model(torch.from_numpy(x)).numpy()[0]
+            return float(a[0]), float(a[1])
+        return controller, f"BC (hidden={cfg['hidden_size']})"
+    if ext == ".zip":
+        sys.path.insert(0, os.path.join(BASE_DIR, "rl"))
+        from stable_baselines3 import PPO
+        from signature_env import make_sb3_controller
+        return make_sb3_controller(PPO.load(policy_path)), "RL (PPO)"
+    raise SystemExit(f"Unknown policy type '{ext}' (expected .pt for BC or .zip for RL)")
 
 
 def _send_vomega(dm, args, v, omega, degs_per_100):
@@ -538,11 +625,21 @@ def _calibrate_and_approach(cam, dm, args, path_mm, degs_per_100):
 
 def cmd_drive(args):
     path_mm = load_path_mm(args.trajectory, args.smooth_window, args.path_spacing)
-    follower = tt.PathFollower(path_mm, args.lookahead)
     heading0 = (np.radians(args.initial_heading_deg)
                 if args.initial_heading_deg is not None
                 else initial_heading_rad(path_mm, args.path_spacing))
     degs_per_100 = _load_degs_per_100(args)
+
+    # Control law: pure pursuit (default) or a trained policy (--policy). A policy
+    # must use its training lookahead (6mm) and sets its own speed (--speed unused).
+    policy_controller = None
+    track_lookahead = args.lookahead
+    if args.policy:
+        policy_controller, kind = load_policy_controller(args.policy)
+        track_lookahead = POLICY_LOOKAHEAD_MM
+        print(f"Policy: {args.policy} [{kind}] - obs converted mm->m, lookahead "
+              f"fixed to {track_lookahead:.0f}mm (training value), --speed ignored.")
+    follower = tt.PathFollower(path_mm, track_lookahead)
 
     print(f"Trajectory: {args.trajectory}")
     print(f"Path: {len(path_mm)} points, start ({path_mm[0,0]:.0f},{path_mm[0,1]:.0f})mm, "
@@ -568,6 +665,9 @@ def cmd_drive(args):
     log = []
     misses = 0
     last_tip = tip_mm
+    record_gif = args.gif is not None
+    gif_frames = []
+    gif_tick = 0
     try:
         if args.manual_start:
             print(f"Position the PENCIL TIP on the path start, robot facing "
@@ -612,9 +712,14 @@ def cmd_drive(args):
                 last_tip = tip_mm
 
             yaw = _yaw_paper(dm, args, heading_offset)
-            v, omega, target, at_end, dist_final = pure_pursuit_control(
-                tip_mm, yaw, follower, args.speed, args.lookahead,
-                tip_offset_mm=args.tip_offset_mm)
+            if policy_controller is None:
+                v, omega, target, at_end, dist_final = pure_pursuit_control(
+                    tip_mm, yaw, follower, args.speed, track_lookahead,
+                    tip_offset_mm=args.tip_offset_mm)
+            else:
+                obs_m, target, at_end, dist_final = policy_obs_m(tip_mm, yaw, follower, path_mm)
+                v_m, omega = policy_controller(obs_m)
+                v = v_m * 1000.0  # policy speed is m/s -> mm/s
 
             # nearest-point tracking error (mm) for the abort test + logging
             err_mm = float(np.min(np.linalg.norm(path_mm - tip_mm, axis=1)))
@@ -641,13 +746,18 @@ def cmd_drive(args):
             log.append((t, tip_mm[0], tip_mm[1], np.degrees(yaw),
                         target[0], target[1], v, omega, lp, rp, err_mm))
 
-            if frame is not None and not args.no_display:
+            if frame is not None and (not args.no_display or record_gif):
                 status = f"t={t:4.1f}s err={err_mm:4.0f}mm yaw={np.degrees(yaw):6.1f} " \
                          f"L={lp:5.1f}% R={rp:5.1f}%"
-                cv2.imshow("closed-loop drive", _draw_overlay(frame, cam.H, path_mm, tip_mm, target, status))
-                if cv2.waitKey(1) & 0xFF == 27:
-                    print("\nESC - aborting.")
-                    break
+                disp = _draw_overlay(frame, cam.H, path_mm, tip_mm, target, status)
+                if record_gif and (gif_tick % max(1, args.gif_every) == 0):
+                    gif_frames.append(_gif_frame(disp, args.gif_width))
+                gif_tick += 1
+                if not args.no_display:
+                    cv2.imshow("closed-loop drive", disp)
+                    if cv2.waitKey(1) & 0xFF == 27:
+                        print("\nESC - aborting.")
+                        break
 
             if done:
                 break
@@ -663,6 +773,15 @@ def cmd_drive(args):
         cv2.destroyAllWindows()
 
     _save_and_report(np.array(log), path_mm, args.trajectory)
+
+    if record_gif and gif_frames:
+        tag = (os.path.splitext(os.path.basename(args.policy))[0] if args.policy
+               else "purepursuit")
+        os.makedirs(CLOSEDLOOP_TRACE_DIR, exist_ok=True)
+        gif_path = (args.gif if isinstance(args.gif, str) and args.gif != "AUTO"
+                    else os.path.join(CLOSEDLOOP_TRACE_DIR,
+                                      f"closedloop_{tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.gif"))
+        _write_gif(gif_frames, gif_path, args.gif_fps)
 
 
 def _save_and_report(log, path_mm, trajectory_path):
@@ -748,6 +867,11 @@ def main():
                        help="Disable the default right-motor invert")
 
     def ctrl_flags(p):
+        p.add_argument("--policy", default=None,
+                       help="Trace with a trained policy instead of pure pursuit: a BC .pt "
+                            "or RL .zip (e.g. models/bc_policy.pt). Obs is converted mm->m at "
+                            "the boundary; lookahead is fixed to the training value and the "
+                            "policy sets its own speed (--speed ignored).")
         p.add_argument("--speed", type=float, default=DEFAULT_SPEED_MM_S, help="Tip speed, mm/s")
         p.add_argument("--lookahead", type=float, default=DEFAULT_LOOKAHEAD_MM,
                        help="Pure-pursuit lookahead, mm (default 12)")
@@ -772,6 +896,16 @@ def main():
                        help="Abort after this many consecutive tip-detection misses")
         p.add_argument("--countdown", type=float, default=8.0)
         p.add_argument("--no-display", action="store_true", help="Skip the live camera window")
+        # -- record the camera overlay as an animated GIF (the tracing phase) --
+        p.add_argument("--gif", nargs="?", const="AUTO", default=None,
+                       help="Record the camera overlay of the trace as a GIF. Bare --gif "
+                            "auto-names it in datasets/closedloop_traces/; or give a path.")
+        p.add_argument("--gif-width", type=int, default=640,
+                       help="Downscale GIF frames to this width, px (default 640)")
+        p.add_argument("--gif-fps", type=float, default=10.0,
+                       help="GIF playback frames per second (default 10, ~real time)")
+        p.add_argument("--gif-every", type=int, default=1,
+                       help="Record every Nth control tick into the GIF (raise to shrink the file)")
         # -- auto-approach to the start (default on) --
         p.add_argument("--manual-start", action="store_true",
                        help="Skip auto-approach: place the tip on the start facing "

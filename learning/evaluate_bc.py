@@ -33,6 +33,10 @@ import common
 import track_trajectory as tt
 from bc_model import load_policy
 
+# BC evaluation outputs (trace .npz + comparison .png) live here, parallel to
+# datasets/sim_traces (pure-pursuit sim) and datasets/closedloop_traces (robot).
+BC_EVAL_DIR = os.path.join(common.PROJECT_DIR, "datasets", "bc_policy")
+
 
 def make_bc_controller(model, normalizer):
     """Wraps a loaded BCPolicy as a track_trajectory.SignatureTracker
@@ -204,11 +208,12 @@ def main():
     print_summary_table(rows)
 
     timestamp = os.path.splitext(os.path.basename(trajectory_path))[0]
-    out_npz = os.path.join(common.PROJECT_DIR, f"bc_eval_{timestamp}.npz")
+    os.makedirs(BC_EVAL_DIR, exist_ok=True)
+    out_npz = os.path.join(BC_EVAL_DIR, f"bc_eval_{timestamp}.npz")
     np.savez(out_npz, actual_trajectory=bc_results[0]["tip"], target_world=path_world)
     print(f"\nSaved BC evaluation trajectory (episode 0) to {out_npz}")
 
-    out_png = args.output or os.path.join(common.PROJECT_DIR, f"bc_eval_{timestamp}.png")
+    out_png = args.output or os.path.join(BC_EVAL_DIR, f"bc_eval_{timestamp}.png")
     plot_episodes(path_world, bc_results, expert_results, out_png)
     print(f"Saved comparison plot to {out_png}")
 
