@@ -20,6 +20,11 @@ pencil-tip position + IMU heading, in the paper mm frame). See
 | Pure pursuit | BC policy |
 | --- | --- |
 | ![pure pursuit closed-loop trace](datasets/closedloop_traces/closedloop_purepursuit_20260722_174640.gif) | ![BC policy closed-loop trace](datasets/closedloop_traces/closedloop_bc_policy_20260722_174524.gif) |
+| ![pure pursuit trace vs target](datasets/closedloop_traces/closedloop_trace_20260722_174640.png) | ![BC policy trace vs target](datasets/closedloop_traces/closedloop_trace_20260722_174524.png) |
+
+Traced tip (red) vs. target (blue) at a matched operating point (30 mm/s, 6 mm
+lookahead): pure pursuit **1.8 mm** RMS, BC **1.9 mm** RMS — BC matches the
+pure-pursuit expert on hardware within run-to-run noise.
 
 ## The pipeline
 
