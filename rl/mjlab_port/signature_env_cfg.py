@@ -37,6 +37,7 @@ from mjlab.managers.observation_manager import (
   ObservationGroupCfg,
   ObservationTermCfg,
 )
+from mjlab.utils.noise import GaussianNoiseCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.rl import RslRlOnPolicyRunnerCfg
@@ -78,6 +79,19 @@ def load_signature_paths() -> tuple:
   return tuple(tt.load_path_world(f) for f in files)
 
 
+# Domain randomization toggle: set LEGOCAR_DR=0 to train a clean (no-noise)
+# baseline for A/B comparison; default on. Observation noise models the real
+# closed-loop sensing gap (camera tip / IMU / encoder) that made BC wobble on
+# hardware. It is applied ONLY in training (the actor group's
+# enable_corruption=not play), so play/eval sees clean observations.
+DR = os.environ.get("LEGOCAR_DR", "1") != "0"
+
+
+def _noise(std: float):
+  """Additive Gaussian observation-noise cfg, or None when DR is disabled."""
+  return GaussianNoiseCfg(operation="add", mean=0.0, std=std) if DR else None
+
+
 def lego_car_signature_env_cfg(
   play: bool = False, num_envs: int = 16
 ) -> ManagerBasedRlEnvCfg:
@@ -90,21 +104,26 @@ def lego_car_signature_env_cfg(
     command_cfg.init_xy_noise = 0.0
     command_cfg.init_yaw_noise = 0.0
 
+  # Noise stds are in each term's own units and applied only in training.
+  # Tune via the constants; see LEGOCAR_DR to turn the whole set off.
   actor_terms = {
     "signature": ObservationTermCfg(
-      func=generated_commands, params={"command_name": "signature_path"}
+      func=generated_commands, params={"command_name": "signature_path"},
+      noise=_noise(0.05),  # scaled tip features ~= camera position noise
     ),
     "base_lin_vel": ObservationTermCfg(
-      func=base_lin_vel, params={"asset_cfg": _CAR_CFG}
+      func=base_lin_vel, params={"asset_cfg": _CAR_CFG}, noise=_noise(0.005)
     ),
     "base_ang_vel": ObservationTermCfg(
-      func=base_ang_vel, params={"asset_cfg": _CAR_CFG}
+      func=base_ang_vel, params={"asset_cfg": _CAR_CFG}, noise=_noise(0.02)  # ~IMU gyro
     ),
     "wheel_vel": ObservationTermCfg(
-      func=joint_vel_rel, params={"asset_cfg": _WHEELS_CFG}
+      func=joint_vel_rel, params={"asset_cfg": _WHEELS_CFG}, noise=_noise(0.1)  # ~encoder
     ),
-    "last_action": ObservationTermCfg(func=last_action),
+    "last_action": ObservationTermCfg(func=last_action),  # policy's own action, exact
   }
+  if not play:
+    print(f"[signature_env_cfg] observation-noise DR: {'ON' if DR else 'OFF'}")
 
   observations = {
     "actor": ObservationGroupCfg(actor_terms, enable_corruption=not play),
