@@ -60,7 +60,12 @@ def main():
   task_id = lego_car_tasks.SIGNATURE_TASK_ID
   env_cfg = load_env_cfg(task_id, play=True)
   env_cfg.scene.num_envs = args.num_envs
-  env_cfg.terminations = {}  # sustained tracking; no resets hiding strays
+  # Eval-only: disable terminations (sustained tracking - no resets hiding strays)
+  # AND rewards. Rewards are unused here, and the finish/off_path reward terms
+  # reference the now-removed termination terms (else KeyError at step). We only
+  # read the command term's err_mm.
+  env_cfg.terminations = {}
+  env_cfg.rewards = {}
   agent_cfg = load_rl_cfg(task_id)
 
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
