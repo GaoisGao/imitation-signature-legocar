@@ -90,7 +90,7 @@ class SignatureEnv(gym.Env):
                  err_gate_mm: float = 3.0,
                  w_action_rate: float = 0.05, w_time: float = 0.05,
                  completion_bonus: float = 30.0, off_path_penalty: float = 30.0,
-                 off_path_limit_mm: float = 20.0):
+                 off_path_limit_mm: float = 20.0, obs_noise_std: float = 0.0):
         super().__init__()
         if not path_worlds:
             raise ValueError("path_worlds must contain at least one path")
@@ -112,6 +112,7 @@ class SignatureEnv(gym.Env):
         self.completion_bonus = completion_bonus
         self.off_path_penalty = off_path_penalty
         self.off_path_limit_mm = off_path_limit_mm
+        self.obs_noise_std = float(obs_noise_std)
 
         self.observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(4,), dtype=np.float32)
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
@@ -206,7 +207,14 @@ class SignatureEnv(gym.Env):
     # -- helpers ---------------------------------------------------------------
 
     def _scaled_obs(self) -> np.ndarray:
-        return (self._raw_obs / OBS_SCALE).astype(np.float32)
+        obs = self._raw_obs / OBS_SCALE
+        if self.obs_noise_std > 0.0:
+            # Additive Gaussian sensor noise on the scaled obs (camera tip / IMU /
+            # encoder), applied only in training envs (deployment reads the real
+            # sensors). Makes the policy robust to the closed-loop sensing gap
+            # that made BC wobble on hardware.
+            obs = obs + self.np_random.normal(0.0, self.obs_noise_std, size=obs.shape)
+        return obs.astype(np.float32)
 
     def _initial_observation(self) -> np.ndarray:
         """Builds the pre-first-action observation without stepping physics,

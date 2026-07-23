@@ -52,6 +52,7 @@ def make_env_fn(path_worlds, args, rank: int):
             completion_bonus=args.completion_bonus,
             off_path_penalty=args.off_path_penalty,
             off_path_limit_mm=args.off_path_limit_mm,
+            obs_noise_std=args.obs_noise,
             max_time=args.max_time)
         env.reset(seed=args.seed + rank)
         return env
@@ -132,6 +133,10 @@ def main():
                          "the PPO policy mean network from")
     ap.add_argument("--domain-rand", action="store_true",
                     help="Randomize mass/friction/gear/damping at each episode reset")
+    ap.add_argument("--obs-noise", type=float, default=0.0,
+                    help="Std of additive Gaussian observation noise during training "
+                         "(0 = off; ~0.05 models the real camera/IMU/encoder sensing "
+                         "gap so the policy is robust to it on hardware)")
     ap.add_argument("--init-xy-noise-mm", type=float, default=10.0)
     ap.add_argument("--init-yaw-noise-deg", type=float, default=15.0)
     ap.add_argument("--max-time", type=float, default=60.0)
@@ -192,7 +197,7 @@ def main():
         print(f"Warm-started policy mean network from {args.warm_start}")
 
     print(f"PPO on {args.num_envs} parallel env(s), {args.total_timesteps} timesteps, "
-          f"domain_rand={args.domain_rand}")
+          f"domain_rand={args.domain_rand}, obs_noise={args.obs_noise}")
     model.learn(total_timesteps=args.total_timesteps)
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
