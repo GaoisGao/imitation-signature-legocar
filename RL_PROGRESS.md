@@ -2,10 +2,10 @@
 
 **Last updated:** 2026-07-23
 
-**One-line status:** mjlab GPU training works (~270–280k steps/s); observation-noise
-domain randomization (v1) trained to **0.86 mm** tracking error; next is the
-nominal A/B baseline, an eval-under-noise comparison, then v2 DR (latency +
-physical params).
+**One-line status:** mjlab GPU training works (~270–280k steps/s). v1 obs-noise DR
+trained to **0.861 mm**, matching the clean nominal baseline (0.778–0.915 mm) — so
+DR is essentially free in nominal accuracy. Next: **eval-under-noise** (does DR hold
+where nominal degrades?), then v2 DR (latency + physical params).
 
 ---
 
@@ -42,10 +42,21 @@ physical params).
 
 ## Results
 
-| Run | Obs noise | Iters | tracking_err_mm | off_path | Notes |
-| --- | --- | --- | --- | --- | --- |
-| `dr_obsnoise` | ON | 300 | **0.86** | 0% | v1 DR, converged |
-| `nominal` | OFF | 300 | _PENDING_ (running 07-22 night) | | `LEGOCAR_DR=0` |
+Sim tracking error (mjlab, 300 iters, 4096 envs, 2026-07-22/23). The metric is
+computed from the TRUE tip state, so the DR row is tracking accuracy *while acting
+on noisy observations*.
+
+| Run (log dir) | Obs noise | tracking_err_mm | Notes |
+| --- | --- | --- | --- |
+| `2026-07-23_00-00-21_nominal` | OFF | **0.778** | clean baseline (best) |
+| `2026-07-22_23-21-21_nominal` | OFF | 0.915 | earlier nominal (run-to-run spread) |
+| `2026-07-22_23-46-21_dr_obsnoise` | ON | **0.861** | v1 obs-noise DR, off_path 0% |
+
+**Takeaway:** the DR policy (0.861 mm, *with* noisy obs) sits inside the nominal
+run-to-run spread (0.778–0.915 mm, *clean* obs) — so observation-noise DR costs
+essentially nothing in nominal accuracy. This proves DR is **not worse**, not yet
+that it's **better**; the robustness payoff needs the eval-under-noise comparison
+(next step): DR should hold where nominal degrades under injected noise.
 
 Hardware baselines (reference only — **NOT directly comparable**: sim vs. real, and
 mjlab uses a wheel-effort action, not (v,ω)): pure pursuit **1.8 mm**, BC **1.9 mm**
@@ -53,8 +64,8 @@ mjlab uses a wheel-effort action, not (v,ω)): pure pursuit **1.8 mm**, BC **1.9
 
 ## Next steps (in order)
 
-1. **Record the nominal result** (`LEGOCAR_DR=0`, 300 iters) and compare its
-   tracking_err_mm to 0.86. If roughly equal, DR is essentially "free" accuracy-wise.
+1. ~~Record the nominal result and compare to DR.~~ **DONE:** nominal 0.778–0.915 mm
+   (clean) vs DR 0.861 mm (noisy) → DR is essentially free in nominal accuracy.
 2. **Build eval-under-noise** *(Claude)*: force `enable_corruption` ON in a play/eval
    run so we can measure nominal-vs-DR tracking **under noise** — the real robustness
    test. Expect nominal to degrade, DR to hold.
@@ -110,7 +121,7 @@ LEGOCAR_DR=0 python rl/mjlab_port/train_car.py --task signature --num-envs 4096 
 
 > Continuing the **lego-signature-car** RL phase on my GPU desktop (mjlab). Read
 > `RL_PROGRESS.md` — it has the full state, results, and mjlab API reference.
-> Current: obs-noise DR (v1) trained to **0.86 mm** tracking; nominal baseline is
-> **\_\_\_ mm** (fill in). Next: (1) compare nominal vs DR, (2) build eval-under-noise
-> to show robustness, (3) v2 DR (latency + physical params). **Propose a plan before
-> changing code.**
+> Current: obs-noise DR (v1) = **0.861 mm** (noisy obs) vs nominal **0.778 mm**
+> (clean) — DR is free in nominal accuracy. Next: (1) build **eval-under-noise** to
+> prove DR holds where nominal degrades, (2) v2 DR (latency + physical params).
+> **Propose a plan before changing code.**
