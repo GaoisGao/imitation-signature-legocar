@@ -719,7 +719,12 @@ def cmd_drive(args):
             else:
                 obs_m, target, at_end, dist_final = policy_obs_m(tip_mm, yaw, follower, path_mm)
                 v_m, omega = policy_controller(obs_m)
-                v = v_m * 1000.0  # policy speed is m/s -> mm/s
+                # m/s -> mm/s, optionally slowed. Scaling v AND omega by the same
+                # factor slows traversal while keeping the path shape (curvature
+                # = omega/v is unchanged) - useful when an RL policy is too
+                # aggressive for the 10 Hz loop it wasn't trained at.
+                v = v_m * 1000.0 * args.policy_speed_scale
+                omega = omega * args.policy_speed_scale
 
             # nearest-point tracking error (mm) for the abort test + logging
             err_mm = float(np.min(np.linalg.norm(path_mm - tip_mm, axis=1)))
@@ -873,6 +878,10 @@ def main():
                             "the boundary; lookahead is fixed to the training value and the "
                             "policy sets its own speed (--speed ignored).")
         p.add_argument("--speed", type=float, default=DEFAULT_SPEED_MM_S, help="Tip speed, mm/s")
+        p.add_argument("--policy-speed-scale", type=float, default=1.0,
+                       help="Scale a --policy's (v, omega) output by this factor "
+                            "(both, so the path shape is preserved). <1 slows an RL "
+                            "policy that's too aggressive for the 10 Hz loop.")
         p.add_argument("--lookahead", type=float, default=DEFAULT_LOOKAHEAD_MM,
                        help="Pure-pursuit lookahead, mm (default 12)")
         p.add_argument("--finish-tol", type=float, default=DEFAULT_FINISH_TOL_MM,
