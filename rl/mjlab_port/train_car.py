@@ -1,22 +1,24 @@
-"""Train the LEGO car in mjlab on CPU (rsl-rl PPO over the batched
-MuJoCo-Warp sim).
+"""Train the LEGO car in mjlab (rsl-rl PPO over the batched MuJoCo-Warp sim).
 
-Checkpoints land in <project>/logs/rsl_rl/<experiment>/<timestamp>/model_*.pt
-every `save_interval` iterations - point play_car.py --checkpoint at any of
-them (or use --checkpoint latest) for hot-swappable viewing in the viser
-browser viewer while training is still running.
+Uses the GPU by default; pass --cpu for the CPU Warp backend (much slower, for
+machines without a CUDA GPU). Checkpoints land in
+<project>/logs/rsl_rl/<experiment>/<timestamp>/model_*.pt every `save_interval`
+iterations - point play_car.py --checkpoint at any of them (or --checkpoint
+latest) for hot-swappable viewing in the viser browser viewer while training is
+still running.
 
 Usage (from the project root):
-    .venv-mjlab\\Scripts\\python.exe rl\\mjlab_port\\train_car.py
-    .venv-mjlab\\Scripts\\python.exe rl\\mjlab_port\\train_car.py --num-envs 64 --max-iterations 500
-    .venv-mjlab\\Scripts\\python.exe rl\\mjlab_port\\train_car.py --task drive
+    python rl/mjlab_port/train_car.py                         # GPU, signature task
+    python rl/mjlab_port/train_car.py --num-envs 2048 --max-iterations 500
+    python rl/mjlab_port/train_car.py --cpu                   # CPU Warp fallback
+    python rl/mjlab_port/train_car.py --task drive
 """
 
-# Must be set before mjlab/warp import: CPU Warp backend + UTF-8 stdio.
+# UTF-8 stdio (some consoles choke on the demo's emoji otherwise). The GPU vs
+# CPU Warp backend is chosen in main() from --cpu, before mjlab/warp import.
 import os
 import sys
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 os.environ.setdefault("PYTHONUTF8", "1")
 if hasattr(sys.stdout, "reconfigure"):
   sys.stdout.reconfigure(encoding="utf-8")
@@ -38,7 +40,16 @@ def main():
                   help="Override the task's default PPO iteration count")
   ap.add_argument("--run-name", type=str, default=None,
                   help="Suffix for the log directory name")
+  ap.add_argument("--cpu", action="store_true",
+                  help="Force the CPU Warp backend (default: use the GPU)")
+  ap.add_argument("--gpu-id", type=int, default=0,
+                  help="CUDA device index to train on (default 0)")
   args = ap.parse_args()
+
+  # Select the Warp backend BEFORE importing mjlab/warp.
+  if args.cpu:
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # hide GPUs -> CPU Warp backend
+  gpu_ids = None if args.cpu else [args.gpu_id]
 
   from mjlab.scripts.train import TrainConfig, launch_training
   from mjlab.tasks.registry import load_env_cfg, load_rl_cfg
@@ -59,11 +70,12 @@ def main():
   cfg = TrainConfig(
     env=env_cfg,
     agent=agent_cfg,
-    gpu_ids=None,  # CPU
+    gpu_ids=gpu_ids,
     log_root=os.path.join(PROJECT_DIR, "logs", "rsl_rl"),
   )
+  backend = "CPU Warp" if args.cpu else f"GPU cuda:{args.gpu_id}"
   print(f"Training {task_id}: {args.num_envs} envs, "
-        f"{agent_cfg.max_iterations} iterations, CPU Warp backend")
+        f"{agent_cfg.max_iterations} iterations, {backend} backend")
   launch_training(task_id, cfg)
 
 
