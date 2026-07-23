@@ -82,9 +82,14 @@ def load_signature_paths() -> tuple:
 # Domain randomization toggle: set LEGOCAR_DR=0 to train a clean (no-noise)
 # baseline for A/B comparison; default on. Observation noise models the real
 # closed-loop sensing gap (camera tip / IMU / encoder) that made BC wobble on
-# hardware. It is applied ONLY in training (the actor group's
+# hardware. Normally applied ONLY in training (the actor group's
 # enable_corruption=not play), so play/eval sees clean observations.
 DR = os.environ.get("LEGOCAR_DR", "1") != "0"
+
+# Force observation noise ON even in play/eval mode, so a trained policy can be
+# evaluated UNDER noise (the nominal-vs-DR robustness test). Default off. Needs
+# DR on too (default) so the noise cfgs are actually attached to the terms.
+EVAL_NOISE = os.environ.get("LEGOCAR_EVAL_NOISE", "0") != "0"
 
 
 def _noise(std: float):
@@ -124,9 +129,11 @@ def lego_car_signature_env_cfg(
   }
   if not play:
     print(f"[signature_env_cfg] observation-noise DR: {'ON' if DR else 'OFF'}")
+  elif EVAL_NOISE:
+    print(f"[signature_env_cfg] EVAL under observation noise: {'ON' if DR else 'cfgs OFF (set LEGOCAR_DR=1)'}")
 
   observations = {
-    "actor": ObservationGroupCfg(actor_terms, enable_corruption=not play),
+    "actor": ObservationGroupCfg(actor_terms, enable_corruption=(not play) or EVAL_NOISE),
     "critic": ObservationGroupCfg({**actor_terms}),
   }
 
