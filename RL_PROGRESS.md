@@ -54,9 +54,23 @@ on noisy observations*.
 
 **Takeaway:** the DR policy (0.861 mm, *with* noisy obs) sits inside the nominal
 run-to-run spread (0.778–0.915 mm, *clean* obs) — so observation-noise DR costs
-essentially nothing in nominal accuracy. This proves DR is **not worse**, not yet
-that it's **better**; the robustness payoff needs the eval-under-noise comparison
-(next step): DR should hold where nominal degrades under injected noise.
+essentially nothing in nominal accuracy.
+
+### Eval under noise (2026-07-23) — nominal vs DR robustness
+
+`eval_signature.py`, 1024 envs, terminations off (sustained tracking), model_299.
+
+| Checkpoint | clean mean | noise mean | noise p95 | noise max |
+| --- | --- | --- | --- | --- |
+| `nominal` | **0.582** | 1.393 | 3.441 | 15.998 |
+| `dr_obsnoise` | 0.806 | **1.313** | **2.696** | **13.682** |
+
+**Takeaway:** nominal wins on clean obs (0.58 vs 0.81 — DR trades a little clean
+accuracy). Under noise, DR degrades *less* (Δ+0.51 vs Δ+0.81) and clearly wins on
+the **tail** (p95 2.70 vs 3.44, max 13.7 vs 16.0). So obs-noise DR gives modest,
+mainly worst-case robustness at this noise level. Latency + physical DR (v2)
+should widen the gap — they model the dominant real-world effects (BLE+camera
+lag, friction/motor) that obs noise alone doesn't.
 
 Hardware baselines (reference only — **NOT directly comparable**: sim vs. real, and
 mjlab uses a wheel-effort action, not (v,ω)): pure pursuit **1.8 mm**, BC **1.9 mm**
