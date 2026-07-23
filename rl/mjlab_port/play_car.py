@@ -1,6 +1,6 @@
 """Launch a fleet of LEGO signature cars in mjlab's browser (viser) viewer.
 
-Runs entirely on CPU (Warp CPU backend) - no NVIDIA GPU needed. Open the
+Uses the GPU by default (pass --cpu for the CPU Warp backend). Open the
 printed URL (http://localhost:8080) in a browser for the interactive 3D
 scene with all cars.
 
@@ -22,14 +22,12 @@ Scripted agents (no checkpoint needed):
     zero             - cars sit still
 """
 
-# Environment MUST be set before mjlab/warp import: force the CPU Warp
-# backend (this machine's GPU is not CUDA) and UTF-8 stdio (mjlab prints
-# emoji, which crashes on a GBK console).
+# UTF-8 stdio (mjlab prints emoji, which crashes on a GBK console). The GPU vs
+# CPU Warp backend is chosen in main() from --cpu/--device, before mjlab import.
 import glob
 import os
 import sys
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 os.environ.setdefault("PYTHONUTF8", "1")
 if hasattr(sys.stdout, "reconfigure"):
   sys.stdout.reconfigure(encoding="utf-8")
@@ -63,12 +61,18 @@ def main():
                   help="Path to a trained rsl-rl model_*.pt, or 'latest' to pick "
                        "the newest one for the task. Enables the viewer's "
                        "hot-swappable checkpoint dropdown.")
-  ap.add_argument("--device", type=str, default="cpu")
+  ap.add_argument("--device", type=str, default="cuda", help="cuda (default) or cpu")
+  ap.add_argument("--cpu", action="store_true",
+                  help="Shortcut for --device cpu (CPU Warp backend)")
   ap.add_argument("--trajectory", type=str, default=None,
                   help="Signature-task only: restrict every env to this one "
                        "trajectory file (target_trajectory_*.npz or "
                        "trajectory_*_paper.npz basename)")
   args = ap.parse_args()
+
+  device = "cpu" if args.cpu else args.device
+  if device == "cpu":
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # force the CPU Warp backend
 
   if args.trajectory:
     os.environ["LEGOCAR_TRAJECTORY"] = args.trajectory
@@ -92,7 +96,7 @@ def main():
       agent="trained",
       checkpoint_file=checkpoint,
       num_envs=args.num_envs,
-      device=args.device,
+      device=device,
       viewer="viser",
       log_root=os.path.join(PROJECT_DIR, "logs", "rsl_rl"),
     ))
@@ -107,9 +111,9 @@ def main():
   env_cfg = load_env_cfg(task_id, play=True)
   env_cfg.scene.num_envs = args.num_envs
 
-  print(f"Building {args.num_envs} LEGO car envs on device '{args.device}' "
-        f"(Warp CPU kernels compile on first run - allow a couple of minutes)...")
-  env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device, render_mode=None)
+  print(f"Building {args.num_envs} LEGO car envs on device '{device}' "
+        f"(first run compiles Warp kernels - allow a moment)...")
+  env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
   env = RslRlVecEnvWrapper(env, clip_actions=None)
 
   action_shape = env.unwrapped.action_space.shape  # (num_envs, 2)
