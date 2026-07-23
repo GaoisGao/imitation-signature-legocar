@@ -2,10 +2,12 @@
 
 **Last updated:** 2026-07-23
 
-**One-line status:** mjlab GPU training works (~270–280k steps/s). v1 obs-noise DR
-trained to **0.861 mm**, matching the clean nominal baseline (0.778–0.915 mm) — so
-DR is essentially free in nominal accuracy. Next: **eval-under-noise** (does DR hold
-where nominal degrades?), then v2 DR (latency + physical params).
+**One-line status:** mjlab (GPU) DR validated in sim — obs-noise DR tightens the
+tail under noise. Pivoted to the deployable **SB3 (v,ω)** policy for the real
+robot; it **fails on hardware** (diverges, ~64 mm) due to a **50 Hz-sim → 10 Hz-
+hardware control-frequency mismatch** (see [rl_hardware_gap.md](rl_hardware_gap.md)),
+NOT the DR. **Now retraining at `--frame-skip 50` (10 Hz-matched).** Classical
+baselines still lead on hardware: pure pursuit 1.8 mm, BC 2.0 mm.
 
 ---
 
@@ -72,23 +74,42 @@ mainly worst-case robustness at this noise level. Latency + physical DR (v2)
 should widen the gap — they model the dominant real-world effects (BLE+camera
 lag, friction/motor) that obs noise alone doesn't.
 
-Hardware baselines (reference only — **NOT directly comparable**: sim vs. real, and
-mjlab uses a wheel-effort action, not (v,ω)): pure pursuit **1.8 mm**, BC **1.9 mm**
-(both at 30 mm/s, 6 mm lookahead). See `bc_vs_pure_pursuit.md`.
+### SB3 (v,ω) policy on the real robot (2026-07-23)
+
+The deployable path. Trained `rl/train_rl.py --warm-start bc --domain-rand
+--obs-noise 0.05` → sim quick-eval 3.6 mm (jittery). On hardware via
+`drive_closed_loop.py --policy`:
+
+| Policy | speed scale | HW RMS | HW max | result |
+| --- | --- | --- | --- | --- |
+| `rl_policy.zip` (old, pre-DR) | 1.0 | 67.8 | 108.8 | diverges |
+| `rl_dr_policy.zip` (DR) | 1.0 | 64.4 | 84.5 | diverges (same mode) |
+| `rl_dr_policy.zip` (DR) | 0.4 | 17.0 | 49.7 | much better, still bad |
+
+Both RL policies diverge the same way; slowing 0.4× cut RMS 64→17. **Root cause:
+50 Hz-sim → 10 Hz-hardware control-frequency mismatch (+ aggressive 60 mm/s action),
+not the DR.** Full analysis in [rl_hardware_gap.md](rl_hardware_gap.md).
+**In progress:** frequency-matched retrain `--frame-skip 50`.
+
+Hardware baselines (the bar to beat): pure pursuit **1.8 mm** / BC **2.0 mm**
+(30 mm/s, 6 mm lookahead). See `bc_vs_pure_pursuit.md`. (The mjlab sim numbers
+above are NOT directly comparable — different action space.)
 
 ## Next steps (in order)
 
-1. ~~Record the nominal result and compare to DR.~~ **DONE:** nominal 0.778–0.915 mm
-   (clean) vs DR 0.861 mm (noisy) → DR is essentially free in nominal accuracy.
-2. **Build eval-under-noise** *(Claude)*: force `enable_corruption` ON in a play/eval
-   run so we can measure nominal-vs-DR tracking **under noise** — the real robustness
-   test. Expect nominal to degrade, DR to hold.
-3. **v2 domain randomization** *(Claude)*: latency (`delay_*` obs fields) + physical
-   DR via `events` (`dr.effort_limits` motor strength, `dr.geom_friction`,
-   `dr.body_mass`, `dr.dof_damping`, mid-episode `push_by_setting_velocity`).
-4. **Later, at the work site:** train the deployable **SB3 (v,ω)** policy
-   (`rl/train_rl.py`) with matching DR and compare on the real robot vs BC / pure
-   pursuit (`drive_closed_loop.py --policy`).
+1. ~~Record nominal vs DR (sim).~~ **DONE** — DR free in nominal accuracy.
+2. ~~Eval-under-noise (mjlab).~~ **DONE** — obs-noise DR tightens the tail under noise.
+3. ~~Port DR to SB3, train, deploy on robot.~~ **DONE, but the policy diverges on
+   hardware** — control-frequency mismatch (see the SB3 hardware section above).
+4. **← CURRENT: frequency-matched SB3 retrain** — `--frame-skip 50` (10 Hz), light
+   DR (`--obs-noise 0.03`), action smoothing (`--w-action-rate 0.1`), warm-start
+   from BC → `models/rl_dr_10hz.zip`. Sim quick-eval, then deploy vs pure pursuit
+   (1.8) / BC (2.0). May need reward retuning (5× fewer steps per episode).
+5. If still short of the classical baselines: cap `V_MAX`/`OMEGA_MAX`, or accept
+   that pure pursuit / BC are the better controllers for this task and use RL only
+   to study robustness in sim.
+6. Optional (mjlab research track): v2 DR = latency (`delay_*`) + physical
+   (`dr.effort_limits`/`geom_friction`/`body_mass`) — study, not deployable.
 
 ## Key facts / gotchas
 
