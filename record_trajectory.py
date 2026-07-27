@@ -15,8 +15,9 @@ setups that use a cyan LEGO tip).
 Start/stop control:
   * By default the button on a LEGO color sensor (attached to the demo pen)
     toggles recording: press once to start, press again to stop + save.
-    The sensor is connected over Bluetooth (default serial 7036, card color
-    magenta). Pass --no-sensor to disable and use the keyboard instead.
+    The sensor is connected over Bluetooth (default serial 2312, card color
+    magenta - the same card the Double Motor uses, so exit this recorder before
+    deploying). Pass --no-sensor to disable and use the keyboard instead.
   * The keyboard still works as a fallback in the camera window:
         's' start/stop   'r' reset current recording   'q' quit
 
@@ -30,7 +31,7 @@ Usage:
     py -3.13 record_trajectory.py                  # human demo (cyan tip), sensor button
     py -3.13 record_trajectory.py --mode robot      # deployment trace (red tip)
     py -3.13 record_trajectory.py --no-sensor        # keyboard control only
-    py -3.13 record_trajectory.py --sensor-serial 7036 --sensor-card-color magenta
+    py -3.13 record_trajectory.py --sensor-serial 2312 --sensor-card-color magenta
 
 Calibration: all four ArUco corner markers (IDs 0-3) must be visible to lock
 the paper frame. Recording only accumulates points while calibration is
@@ -183,7 +184,10 @@ def main():
     ap.add_argument("--resample-hz", type=float, default=60.0, help="Uniform resample rate (Hz)")
     ap.add_argument("--no-sensor", action="store_true",
                     help="Do not use the LEGO color-sensor button; keyboard control only.")
-    ap.add_argument("--sensor-serial", default="7036", help="Color-sensor Bluetooth serial (default 7036)")
+    ap.add_argument("--sensor-serial", default="2312",
+                    help="Color-sensor Bluetooth serial (default 2312, this robot's card). "
+                         "NOTE: the Double Motor uses the SAME card, so exit the recorder "
+                         "before running drive_closed_loop.py or the connection is held.")
     ap.add_argument("--sensor-card-color", default="magenta",
                     help="Color-sensor pairing card color (default magenta)")
     ap.add_argument("--show-mask", action="store_true",

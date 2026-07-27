@@ -12,19 +12,63 @@ reinforcement-learning (RL) policy.
 
 ## Closed-loop demo (real robot, overhead camera + IMU)
 
-The car tracing the same signature under closed-loop control (camera-measured
-pencil-tip position + IMU heading, in the paper mm frame). See
-[docs/closed_loop_pure_pursuit.md](docs/closed_loop_pure_pursuit.md) and
-[bc_vs_pure_pursuit.md](bc_vs_pure_pursuit.md).
+All three controllers tracing the **same signature** in one session — same robot,
+same calibration, same battery charge. Closed-loop throughout: camera-measured
+pencil-tip position plus IMU heading, in the paper mm frame.
 
-| Pure pursuit | BC policy |
-| --- | --- |
-| ![pure pursuit closed-loop trace](datasets/closedloop_traces/closedloop_purepursuit_20260722_174640.gif) | ![BC policy closed-loop trace](datasets/closedloop_traces/closedloop_bc_policy_20260722_174524.gif) |
-| ![pure pursuit trace vs target](datasets/closedloop_traces/closedloop_trace_20260722_174640.png) | ![BC policy trace vs target](datasets/closedloop_traces/closedloop_trace_20260722_174524.png) |
+| Pure pursuit | Behaviour cloning | Reinforcement learning |
+| --- | --- | --- |
+| ![pure pursuit closed-loop trace](datasets/closedloop_traces/demo_pp.gif) | ![BC policy closed-loop trace](datasets/closedloop_traces/demo_bc.gif) | ![RL policy closed-loop trace](datasets/closedloop_traces/demo_rl.gif) |
+| ![pure pursuit trace vs target](datasets/closedloop_traces/demo_pp.png) | ![BC policy trace vs target](datasets/closedloop_traces/demo_bc.png) | ![RL policy trace vs target](datasets/closedloop_traces/demo_rl.png) |
+| **1.6 mm** RMS · 3.7 mm max | **1.7 mm** RMS · 4.1 mm max | **2.0 mm** RMS · 4.7 mm max |
 
-Traced tip (red) vs. target (blue) at a matched operating point (30 mm/s, 6 mm
-lookahead): pure pursuit **1.8 mm** RMS, BC **1.9 mm** RMS — BC matches the
-pure-pursuit expert on hardware within run-to-run noise.
+## The three controllers compared
+
+| | RMS | max | time | mean speed | ω chatter | systematic bias |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Pure pursuit** (classical) | **1.6 mm** | **3.7 mm** | **8.1 s** | **18.5 mm/s** | 0.043 | -0.39 mm |
+| **Behaviour cloning** | 1.7 mm | 4.1 mm | 8.1 s | 18.8 mm/s | 0.038 | **-0.04 mm** |
+| **Reinforcement learning** | 2.0 mm | 4.7 mm | 15.6 s | 9.1 mm/s | **0.015** | -0.99 mm |
+
+(ω chatter = mean step-to-step change in commanded angular rate — the oscillation
+measure from `rl/deploy/trace_bias.py`. Bias = mean signed cross-track error;
+negative means riding inside the curve.)
+
+**Pure pursuit is still the one to beat.** It has an analytic model of the
+geometry, so it needs no data and generalizes to any path for free. Best accuracy
+and fastest traversal.
+
+**BC matches it, which is the point.** Within 0.1 mm and identical speed — the
+distillation transferred to hardware essentially losslessly. It cannot *exceed*
+pure pursuit, because pure pursuit is its supervision target. What it buys is a
+4→64→64→2 MLP that runs anywhere, with no lookahead geometry to tune.
+
+**RL is close but slower, and gets there differently.** It is the only controller
+never shown the expert's actions — it learned from reward alone in simulation, and
+had to cross the sim-to-real gap on its own. Its commands are **2.5× smoother**
+than either classical method (0.015 vs 0.038-0.043), but it trades speed for
+accuracy: 15.6 s against 8.1 s. Its residual is dominated by a -0.99 mm inward
+bias (corner-cutting), where BC's is nearly zero.
+
+The honest summary: **classical control wins on this task.** The signature-tracing
+problem is exactly what pure pursuit was designed for — a known path, good state
+feedback, no contact dynamics. The learned policies are worth building because they
+extend to settings where no such model exists, and RL closing to within 0.4 mm of a
+purpose-built analytic controller, from reward alone, is the result worth reporting.
+
+Getting RL there took three fixes, each worth roughly an order of magnitude — the
+robot's wheel speed loop has a **0.48 s lag** the simulator did not model,
+exploration noise must scale with **control period**, and the speed and angular
+ceilings must be capped **together**. First hardware deployment: 64.4 mm and
+diverging. See [rl/TRAINING_LOG.md](rl/TRAINING_LOG.md) for the run-by-run record.
+
+Reproduce (recording the newest signature is picked up automatically):
+
+```bash
+py -3.13 drive_closed_loop.py drive --card-serial 2312 --card-color magenta   --trajectory datasets/trajectories/target_trajectory_20260722_160100.npz   --motor-accel 100 --speed 30 --lookahead 6                                    # pure pursuit
+  #  ... --policy models/bc_policy.pt                                           # BC
+  #  ... --policy models/rl_A_best.zip --policy-omega-scale 0.2                 # RL
+```
 
 ## The pipeline
 

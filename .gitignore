@@ -21,6 +21,8 @@ tape_*.npz
 # Screen/camera recordings: tens of MB each, regenerable from a re-run
 *.gif
 *.mp4
+# ...except the downscaled README demo clips (480px, every 2nd-3rd frame)
+!datasets/closedloop_traces/demo_*.gif
 
 # Training runs / logs
 rl/runs/
