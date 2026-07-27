@@ -156,8 +156,10 @@ rl/
   train_rl.py          SB3 PPO + SubprocVecEnv (CPU-parallel), --warm-start
                        models/bc_policy.pt, --domain-rand, TensorBoard logging,
                        post-training quick-eval plot
-  evaluate_rl.py       (planned) same protocol as learning/evaluate_bc.py:
-                       paired seeds, --compare-expert, tracking-error plots
+  evaluate_rl.py       deterministic eval + tracking-error plots. --from-fit
+                       evaluates on the MEASURED wheel-lag plant (deploy/sysid/);
+                       the default ideal plant flatters a policy badly, see
+                       TRAINING_LOG.md. Set --frame-skip to the policy's config.
   deploy/              real-robot deployment. openloop_deploy.py: replay the
                        trained SB3 policy's wheel-speed tape on the physical
                        Double Motor with no sensing (subcommands: tape / jog /

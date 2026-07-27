@@ -14,8 +14,15 @@ What this file adds on top of the tracker:
     instead of running statistics, so deployment sees exactly the training
     scaling with no VecNormalize state to carry around;
   - frame skip: one policy action is held for `frame_skip` physics steps
-    (default 10 -> 50 Hz control at the model's 2 ms timestep), keeping
-    episodes a manageable few hundred steps;
+    (default 50 -> 10 Hz control at the model's 2 ms timestep), matching the
+    real robot's 10 Hz command cadence (drive_closed_loop.py CONTROL_DT=0.1)
+    so the policy is trained at the frequency it is deployed at. The inner
+    wheel-velocity PI still runs every physics step (500 Hz), standing in for
+    the SPIKE hub's fast internal speed loop. NOTE: the per-step time/track/
+    action-rate penalties are frequency-dependent (they accumulate once per
+    control step); their default weights below are scaled for the 10 Hz default
+    so the *per-second* objective matches the earlier 50 Hz tuning - if you
+    change frame_skip, rescale them the same way (see the reward weights);
   - reward: accuracy-GATED arc-length progress (progress earns nothing
     unless the tip is within ~err_gate_mm of its local stretch of path -
     this is what makes the objective speed-invariant; per-step error
@@ -38,6 +45,7 @@ What this file adds on top of the tracker:
 
 import os
 import sys
+from collections import deque
 
 import gymnasium as gym
 import mujoco
@@ -68,6 +76,16 @@ DEFAULT_DR_SCALES = {
     "friction": 0.30,       # sliding friction of wheels and paper
     "gear": 0.20,           # actuator torque scale (seen as model mismatch by the PI loop)
     "wheel_damping": 0.30,
+    "vel_lag": 0.40,        # +-40% on the wheel speed-loop lag/dead time: the
+                            # measured ~480ms comes from the firmware's reported
+                            # speed, which may be filtered, so the true lag is
+                            # uncertain - randomize it so the policy is robust to
+                            # whatever it turns out to be, rather than tuned to one
+                            # guess (only applied when vel_lag_tau > 0).
+    "obs_delay": 0.50,      # +-50% (rounded to whole control steps) on the
+                            # camera/BLE observation delay: it is even less well
+                            # known than the wheel lag, so randomize it widely
+                            # (only applied when obs_delay_steps > 0).
 }
 
 
@@ -78,7 +96,7 @@ class SignatureEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, path_worlds, frame_skip: int = 10,
+    def __init__(self, path_worlds, frame_skip: int = 50,
                  lookahead: float = tt.DEFAULT_LOOKAHEAD,
                  finish_tol: float = tt.DEFAULT_FINISH_TOL,
                  path_spacing: float = tt.DEFAULT_PATH_SPACING,
@@ -86,11 +104,13 @@ class SignatureEnv(gym.Env):
                  init_xy_noise: float = 0.010,
                  init_yaw_noise: float = np.radians(15.0),
                  domain_rand: bool = False, dr_scales: dict = None,
-                 w_progress: float = 2.0, w_track: float = 0.02,
+                 w_progress: float = 2.0, w_track: float = 0.10,
                  err_gate_mm: float = 3.0,
-                 w_action_rate: float = 0.05, w_time: float = 0.05,
+                 w_action_rate: float = 0.01, w_time: float = 0.25,
                  completion_bonus: float = 30.0, off_path_penalty: float = 30.0,
-                 off_path_limit_mm: float = 20.0, obs_noise_std: float = 0.0):
+                 off_path_limit_mm: float = 20.0, obs_noise_std: float = 0.0,
+                 vel_lag_tau: float = 0.0, vel_dead_time: float = 0.0,
+                 v_max: float = V_MAX, obs_delay_steps: int = 0):
         super().__init__()
         if not path_worlds:
             raise ValueError("path_worlds must contain at least one path")
@@ -113,6 +133,22 @@ class SignatureEnv(gym.Env):
         self.off_path_penalty = off_path_penalty
         self.off_path_limit_mm = off_path_limit_mm
         self.obs_noise_std = float(obs_noise_std)
+        self.vel_lag_tau = float(vel_lag_tau)
+        self.vel_dead_time = float(vel_dead_time)
+        # Speed ceiling this policy is trained against. The module default
+        # V_MAX=0.06 is 2x the expert's 0.03 m/s; hardware could only realize
+        # ~0.03 (see rl/TRAINING_LOG.md hardware section), so capping here lets
+        # the policy spend its whole action range inside the achievable envelope
+        # instead of relying on --policy-speed-scale at deploy time.
+        # DEPLOYMENT MUST USE THE SAME VALUE - it is recorded in the run config
+        # json and read back by evaluate_rl.py / drive_closed_loop.py.
+        self.v_max = float(v_max)
+        # Observation delay in CONTROL steps: the real loop sees the world
+        # through camera exposure + blob detection + BLE, none of which the sim
+        # had. At 10 Hz one step is already 100 ms, the same order as the wheel
+        # lag. Applied to the scaled obs the policy consumes.
+        self.obs_delay_steps = int(obs_delay_steps)
+        self._obs_buf = None
 
         self.observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(4,), dtype=np.float32)
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
@@ -135,10 +171,20 @@ class SignatureEnv(gym.Env):
             _env._raw_obs = raw_obs
             return _env._cmd
 
+        # Per-episode wheel-loop lag: randomized around the nominal when domain
+        # randomization is on (see DEFAULT_DR_SCALES["vel_lag"]), so the policy
+        # sees a spread of plausible real lags instead of one point estimate.
+        lag_tau, lag_dead = self.vel_lag_tau, self.vel_dead_time
+        if self.domain_rand and self.vel_lag_tau > 0.0:
+            f = self.dr_scales.get("vel_lag", 0.0)
+            lag_tau *= float(self.np_random.uniform(1.0 - f, 1.0 + f))
+            lag_dead *= float(self.np_random.uniform(1.0 - f, 1.0 + f))
+
         self.tracker = tt.SignatureTracker(
             self.path_world, lookahead=self.lookahead, finish_tol=self.finish_tol,
             path_spacing=self.path_spacing, controller=controller,
             init_xy_noise=self.init_xy_noise, init_yaw_noise=self.init_yaw_noise,
+            vel_lag_tau=lag_tau, vel_dead_time=lag_dead,
             seed=int(self.np_random.integers(2 ** 31)))
 
         if self.domain_rand:
@@ -150,13 +196,20 @@ class SignatureEnv(gym.Env):
 
         self._elapsed = 0
         self._prev_action = np.zeros(2, dtype=np.float32)
+        # Per-episode observation delay, randomized like the wheel lag above.
+        self._ep_obs_delay = self.obs_delay_steps
+        if self.domain_rand and self.obs_delay_steps > 0:
+            f = self.dr_scales.get("obs_delay", 0.0)
+            self._ep_obs_delay = int(round(
+                self.obs_delay_steps * float(self.np_random.uniform(1.0 - f, 1.0 + f))))
+        self._obs_buf = None          # refilled on the first _scaled_obs() call
         obs = self._initial_observation()
         self._prev_path_idx = self.tracker.follower.idx
         return obs, {}
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=np.float32).reshape(2), -1.0, 1.0)
-        self._cmd = (float(action[0] * V_MAX), float(action[1] * OMEGA_MAX))
+        self._cmd = (float(action[0] * self.v_max), float(action[1] * OMEGA_MAX))
 
         finished = False
         for _ in range(self.frame_skip):
@@ -184,6 +237,10 @@ class SignatureEnv(gym.Env):
         # the car goes, so run 2 learned to sprint sloppily - see
         # rl/TRAINING_LOG.md.)
         accuracy_gate = float(np.exp(-(err_mm / self.err_gate_mm) ** 2))
+        # Progress telescopes to the path length regardless of control rate, so
+        # w_progress is frequency-invariant. The other three accumulate ONCE per
+        # control step, so their episode totals scale with frame_skip - their
+        # defaults are set for the 10 Hz default (see __init__ docstring).
         reward = (self.w_progress * progress_mm * accuracy_gate
                   - self.w_track * err_mm ** 2
                   - self.w_action_rate * float(np.sum((action - self._prev_action) ** 2))
@@ -214,7 +271,19 @@ class SignatureEnv(gym.Env):
             # sensors). Makes the policy robust to the closed-loop sensing gap
             # that made BC wobble on hardware.
             obs = obs + self.np_random.normal(0.0, self.obs_noise_std, size=obs.shape)
-        return obs.astype(np.float32)
+        obs = obs.astype(np.float32)
+
+        # Observation delay: hand the policy the state from N control steps ago.
+        # Modelled AFTER the noise so each delivered frame carries the noise it
+        # was captured with, as a real delayed measurement would.
+        delay = getattr(self, "_ep_obs_delay", self.obs_delay_steps)
+        if delay > 0:
+            n = delay + 1
+            if self._obs_buf is None or self._obs_buf.maxlen != n:
+                self._obs_buf = deque([obs.copy()] * n, maxlen=n)
+            self._obs_buf.append(obs.copy())
+            obs = self._obs_buf[0]      # captured obs_delay_steps ticks ago
+        return obs
 
     def _initial_observation(self) -> np.ndarray:
         """Builds the pre-first-action observation without stepping physics,
@@ -252,7 +321,29 @@ class SignatureEnv(gym.Env):
             mujoco.mj_step(m, d)
 
 
-def make_sb3_controller(model):
+def v_max_from_config(model_path, default=V_MAX):
+    """Read the v_max a policy was trained with from its sibling _config.json.
+
+    Deploying a policy with the wrong V_MAX silently rescales every speed it
+    commands (a 0.035-trained policy run at 0.06 moves 1.7x too fast), so both
+    evaluate_rl.py and drive_closed_loop.py resolve it from the run config
+    rather than the module constant."""
+    import json
+    stem = os.path.splitext(model_path)[0]
+    # "<name>_best.zip" is a checkpoint of the "<name>" run and shares its
+    # config, so fall back to the parent stem rather than silently returning
+    # the module default (which would run a capped policy far too fast).
+    candidates = [stem + "_config.json"]
+    if stem.endswith("_best"):
+        candidates.append(stem[:-len("_best")] + "_config.json")
+    for cfg in candidates:
+        if os.path.exists(cfg):
+            with open(cfg) as f:
+                return float(json.load(f).get("v_max", default))
+    return float(default)
+
+
+def make_sb3_controller(model, v_max: float = V_MAX):
     """Wraps a trained SB3 policy as a SignatureTracker `controller(raw_obs)
     -> (v, omega)` callable (the same hook learning/evaluate_bc.py uses), so
     evaluation and deployment reuse the exact training-time obs/action scaling."""
@@ -260,5 +351,5 @@ def make_sb3_controller(model):
         obs = (raw_obs / OBS_SCALE).astype(np.float32)
         action, _ = model.predict(obs, deterministic=True)
         action = np.clip(action, -1.0, 1.0)
-        return float(action[0] * V_MAX), float(action[1] * OMEGA_MAX)
+        return float(action[0] * v_max), float(action[1] * OMEGA_MAX)
     return controller

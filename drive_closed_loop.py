@@ -330,6 +330,17 @@ def _connect(args):
     dm = doubleMotor()
     dm.connect(card_serial=args.card_serial, card_color=card_color)
     dm.motor_reset_relative_position()
+    # Crank the speed-loop acceleration up: at the firmware default the wheels
+    # take ~340ms + ~95ms dead to reach a commanded speed (motor_sysid.py, speed
+    # mode), so at the 10 Hz control tick the motor is permanently mid-ramp and
+    # can't follow the controller - the biggest sim-to-real gap. accel=100
+    # shrinks that ramp. Keep this identical between sysid, sim tuning, and
+    # deployment so the plant the policy trained on matches the robot.
+    accel = getattr(args, "motor_accel", 100)
+    if accel is not None:
+        for m in (le.MOTOR_LEFT, le.MOTOR_RIGHT):
+            dm.motor_set_acceleration(int(accel), int(accel), motor=m)
+        print(f"Set motor acceleration/deceleration = {accel}")
     return dm, le
 
 
@@ -387,8 +398,13 @@ def load_policy_controller(policy_path):
     if ext == ".zip":
         sys.path.insert(0, os.path.join(BASE_DIR, "rl"))
         from stable_baselines3 import PPO
-        from signature_env import make_sb3_controller
-        return make_sb3_controller(PPO.load(policy_path)), "RL (PPO)"
+        from signature_env import make_sb3_controller, v_max_from_config
+        # Resolve V_MAX from the policy's own run config, not the module default:
+        # a policy trained with a capped v_max would otherwise be run at up to
+        # 2x its intended speed (see rl/TRAINING_LOG.md).
+        v_max = v_max_from_config(policy_path)
+        return (make_sb3_controller(PPO.load(policy_path), v_max=v_max),
+                f"RL (PPO, v_max={v_max:.3f} m/s)")
     raise SystemExit(f"Unknown policy type '{ext}' (expected .pt for BC or .zip for RL)")
 
 
@@ -870,6 +886,11 @@ def main():
                        help="Negate right motor (default on: motor-check showed forward reversed)")
         p.add_argument("--no-invert-right", dest="invert_right", action="store_false",
                        help="Disable the default right-motor invert")
+        p.add_argument("--motor-accel", type=float, default=100.0,
+                       help="Motor acceleration/deceleration (0-100) set at connect. "
+                            "High (100) removes the firmware's gentle speed ramp, the "
+                            "dominant sim-to-real lag; must match the value sysid was "
+                            "run at and the value the policy was tuned/trained against")
 
     def ctrl_flags(p):
         p.add_argument("--policy", default=None,

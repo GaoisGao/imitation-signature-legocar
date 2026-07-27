@@ -89,7 +89,25 @@ The deployable path. Trained `rl/train_rl.py --warm-start bc --domain-rand
 Both RL policies diverge the same way; slowing 0.4× cut RMS 64→17. **Root cause:
 50 Hz-sim → 10 Hz-hardware control-frequency mismatch (+ aggressive 60 mm/s action),
 not the DR.** Full analysis in [rl_hardware_gap.md](rl_hardware_gap.md).
-**In progress:** frequency-matched retrain `--frame-skip 50`.
+**Superseded** by the wheel speed-loop lag work below.
+
+### Sim-to-real gap 2: wheel speed-loop lag (2026-07-27)
+
+Frequency matching alone was not enough. `rl/deploy/motor_sysid.py` measured the
+real speed loop at **τ=0.479 s, dead=0.063 s** (`sysid/sysid_fit_speed.json`);
+`track_trajectory.py` now models it (`vel_lag_tau`/`vel_dead_time`) and
+`evaluate_rl.py --from-fit` evaluates on it. Under that plant **every checkpoint
+through `rl_10hz_lag` aborts off-path**, while pure pursuit still finishes
+(1.75 mm ideal → 2.59 mm lagged) — so the plant model is sound and the aborts are
+a policy failure.
+
+Second fix: **`log_std_init` -1.0 → -2.5**. At 10 Hz an action is held 100 ms, so
+σ=0.37 throws the tip off-path before the next correction. `rl_10hz_lag` (σ=0.37)
+scored **0.00 success across all 2M steps**; the identical run at σ=0.08 reaches
+**0.85**.
+
+Full run-by-run record, reward-shaping history, and the deterministic
+under-lag eval table: **[rl/TRAINING_LOG.md](rl/TRAINING_LOG.md)**.
 
 Hardware baselines (the bar to beat): pure pursuit **1.8 mm** / BC **2.0 mm**
 (30 mm/s, 6 mm lookahead). See `bc_vs_pure_pursuit.md`. (The mjlab sim numbers
@@ -101,10 +119,39 @@ above are NOT directly comparable — different action space.)
 2. ~~Eval-under-noise (mjlab).~~ **DONE** — obs-noise DR tightens the tail under noise.
 3. ~~Port DR to SB3, train, deploy on robot.~~ **DONE, but the policy diverges on
    hardware** — control-frequency mismatch (see the SB3 hardware section above).
-4. **← CURRENT: frequency-matched SB3 retrain** — `--frame-skip 50` (10 Hz), light
-   DR (`--obs-noise 0.03`), action smoothing (`--w-action-rate 0.1`), warm-start
-   from BC → `models/rl_dr_10hz.zip`. Sim quick-eval, then deploy vs pure pursuit
-   (1.8) / BC (2.0). May need reward retuning (5× fewer steps per episode).
+4. ~~Frequency-matched SB3 retrain (`--frame-skip 50`) → `rl_dr_10hz.zip`.~~
+   **DONE, still fails** — 0.96 success in sim but aborts at 11.1 s under the
+   measured wheel lag. Frequency was necessary, not sufficient.
+5. ~~Measure the real speed loop + model it in sim.~~ **DONE** — `motor_sysid.py`
+   → τ=0.479 s / dead=0.063 s; `track_trajectory.py` reproduces it.
+6. ~~Lag-matched retrain at `--log-std-init -2.5`~~ → **`models/rl_10hz_lag_v2.zip`,
+   the first RL policy to finish under the measured lag** (6/7 signatures,
+   4.68 mm mean RMS; success 0.00 → 0.89). But pure pursuit on the identical plant
+   is 6/7 at **2.55 mm** — RL is still ~1.8× worse and has not earned a hardware slot.
+7. ~~Deploy `rl_10hz_lag_v2` on hardware.~~ **DONE — it works.** 3.2-3.5 mm RMS,
+   completes the signature at speed scale 0.4-0.5 (≤30 mm/s), vs **64.4 mm and
+   diverging** before the lag work. Sim predicted it (3.57 mm sim → 3.3-3.5 mm real).
+   Fails above 30 mm/s. Full table in [rl/TRAINING_LOG.md](rl/TRAINING_LOG.md).
+8. ~~Run A: cap `V_MAX` 0.06 → 0.035, `completion_bonus` 30 → 100, `w_time`
+   0.25 → 0.10, early-stop.~~ **DONE — 4.68 → 3.54 mm (24% better), 6/7 finishing.**
+   Gap to pure pursuit down from 1.8× to 1.4×. The speed cap was the dominant
+   effect. Full analysis: [rl/TRAINING_LOG.md](rl/TRAINING_LOG.md) Run 7.
+9. **← NEXT: Run B — observation latency.** Measured at **2.0 control ticks total
+   loop delay** (0.201 s) by cross-correlating commanded ω against IMU yaw rate
+   across 8 hardware traces (corr 0.94-0.97, unanimous). Actuation dead time
+   (0.063 s) is already modelled, so ~1 tick of additional *sensing* delay:
+   train Run A's config plus `--obs-delay 1`. Caveat: that measurement uses the
+   IMU path; the camera path feeding dx/dy may be slower, so sweep 2 if 1 helps.
+10. **Calibration (no retrain, biggest single win available).** `rl/deploy/trace_bias.py`
+   splits a trace's error into constant offset vs oscillation. Every hardware run is
+   offset to the RIGHT of travel: pure pursuit bias **-1.58 mm of its 1.76 mm RMS
+   (81%)**, RL ~-1.9 mm of 3.2 mm (~35%). Same sign under both controllers at every
+   speed → geometry, not policy. Fixing it takes pure pursuit to ~0.8 mm and RL to
+   ~2.5 mm for zero training. Bisect: motor asymmetry → IMU yaw bias → lateral tip
+   offset.
+8. Investigate `target_trajectory_20260720_162845` — **both** RL and pure pursuit
+   time out on it while tracking accurately (2.98 / 1.13 mm). A plant limitation,
+   not a policy failure.
 5. If still short of the classical baselines: cap `V_MAX`/`OMEGA_MAX`, or accept
    that pure pursuit / BC are the better controllers for this task and use RL only
    to study robustness in sim.

@@ -26,7 +26,7 @@ import numpy as np
 import torch
 
 from signature_env import (ACTION_SCALE, OBS_SCALE, RL_DIR, PROJECT_DIR,
-                           SignatureEnv)
+                           SignatureEnv, V_MAX as DEFAULT_V_MAX)
 
 import track_trajectory as tt  # signature_env put PROJECT_DIR on sys.path
 import trajectory_io as tio
@@ -53,6 +53,8 @@ def make_env_fn(path_worlds, args, rank: int):
             off_path_penalty=args.off_path_penalty,
             off_path_limit_mm=args.off_path_limit_mm,
             obs_noise_std=args.obs_noise,
+            vel_lag_tau=args.vel_lag_tau, vel_dead_time=args.vel_dead_time,
+            v_max=args.v_max, obs_delay_steps=args.obs_delay,
             max_time=args.max_time)
         env.reset(seed=args.seed + rank)
         return env
@@ -102,7 +104,10 @@ def quick_eval(model, path_world, args, out_png: str):
     """One deterministic episode from the exact nominal start, plotted with
     the same target-vs-tip comparison track_trajectory.py uses."""
     env = SignatureEnv([path_world], frame_skip=args.frame_skip,
-                       init_xy_noise=0.0, init_yaw_noise=0.0, max_time=args.max_time)
+                       init_xy_noise=0.0, init_yaw_noise=0.0,
+                       vel_lag_tau=args.vel_lag_tau, vel_dead_time=args.vel_dead_time,
+                       v_max=args.v_max, obs_delay_steps=args.obs_delay,
+                       max_time=args.max_time)
     obs, _ = env.reset(seed=0)
     done = False
     while not done:
@@ -126,8 +131,12 @@ def main():
     ap.add_argument("--num-envs", type=int, default=8,
                     help="Parallel environment processes (default 8)")
     ap.add_argument("--total-timesteps", type=int, default=2_000_000)
-    ap.add_argument("--frame-skip", type=int, default=10,
-                    help="Physics steps per policy action (10 -> 50 Hz control)")
+    ap.add_argument("--frame-skip", type=int, default=50,
+                    help="Physics steps per policy action (50 -> 10 Hz control, "
+                         "matching the real robot's 10 Hz command cadence). If you "
+                         "change this, rescale --w-track/--w-time (x frame_skip/50) "
+                         "and --w-action-rate (x 50/frame_skip) to keep the per-second "
+                         "objective, since those penalties accumulate per control step")
     ap.add_argument("--warm-start", type=str, default=None,
                     help="Path to a BC checkpoint (models/bc_policy.pt) to initialize "
                          "the PPO policy mean network from")
@@ -137,18 +146,45 @@ def main():
                     help="Std of additive Gaussian observation noise during training "
                          "(0 = off; ~0.05 models the real camera/IMU/encoder sensing "
                          "gap so the policy is robust to it on hardware)")
+    ap.add_argument("--vel-lag-tau", type=float, default=0.0,
+                    help="First-order time constant (s) of the wheel speed loop, "
+                         "emulating the SPIKE hub's internal speed controller. Set to "
+                         "the tau measured by rl/deploy/motor_sysid.py (0 = instant, "
+                         "the old sim behavior)")
+    ap.add_argument("--vel-dead-time", type=float, default=0.0,
+                    help="Dead time (s) before wheel speed commands take effect "
+                         "(BLE/transport lag); set to the dead time from motor_sysid.py")
+    ap.add_argument("--v-max", type=float, default=DEFAULT_V_MAX,
+                    help=f"Speed ceiling, m/s (action[0]=1 -> this speed). Default "
+                         f"{DEFAULT_V_MAX} is 2x the expert's 0.03, but hardware could "
+                         f"only realize ~0.03 (rl/TRAINING_LOG.md): above that the "
+                         f"policy aborts mid-trace. Cap to ~0.035 so the whole action "
+                         f"range is usable instead of scaling down at deploy time. "
+                         f"Recorded in the run config and read back at deployment.")
+    ap.add_argument("--obs-delay", type=int, default=0,
+                    help="Observation delay in CONTROL steps: the policy sees the "
+                         "state from N ticks ago, modelling camera exposure + blob "
+                         "detection + BLE. At 10 Hz one step is 100 ms - the same "
+                         "order as the wheel lag - and the sim otherwise assumes "
+                         "instant sensing. Measure it before guessing.")
+    ap.add_argument("--early-stop-at", type=int, default=None,
+                    help="Also save the best-success_rate checkpoint seen after this "
+                         "many steps to <output>_best.zip. Run 6 peaked 0.89 @1368k "
+                         "and decayed to 0.79 by 2M, so the final model is not "
+                         "necessarily the best one.")
     ap.add_argument("--init-xy-noise-mm", type=float, default=10.0)
     ap.add_argument("--init-yaw-noise-deg", type=float, default=15.0)
     ap.add_argument("--max-time", type=float, default=60.0)
     # reward weights (see SignatureEnv)
     ap.add_argument("--w-progress", type=float, default=2.0)
-    ap.add_argument("--w-track", type=float, default=0.02,
-                    help="Quadratic tracking penalty weight, per mm^2 of tip error")
+    ap.add_argument("--w-track", type=float, default=0.10,
+                    help="Quadratic tracking penalty weight, per mm^2 of tip error "
+                         "(tuned for the 10 Hz default frame_skip; see --frame-skip)")
     ap.add_argument("--err-gate-mm", type=float, default=3.0,
                     help="Accuracy gate width: progress reward is scaled by "
                          "exp(-(err/this)^2), so sloppy progress earns nothing")
-    ap.add_argument("--w-action-rate", type=float, default=0.05)
-    ap.add_argument("--w-time", type=float, default=0.05)
+    ap.add_argument("--w-action-rate", type=float, default=0.01)
+    ap.add_argument("--w-time", type=float, default=0.25)
     ap.add_argument("--completion-bonus", type=float, default=30.0)
     ap.add_argument("--off-path-penalty", type=float, default=30.0)
     ap.add_argument("--off-path-limit-mm", type=float, default=20.0)
@@ -158,9 +194,16 @@ def main():
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--gamma", type=float, default=0.995)
     ap.add_argument("--ent-coef", type=float, default=0.0)
-    ap.add_argument("--log-std-init", type=float, default=-1.0,
+    ap.add_argument("--log-std-init", type=float, default=-2.5,
                     help="Initial exploration log-std in the [-1,1] action space "
-                         "(-1.0 -> std 0.37; keep modest with --warm-start)")
+                         "(-2.5 -> std 0.08). MUST scale with control frequency: each "
+                         "sampled action is held for one control tick, so at the 10 Hz "
+                         "default (frame_skip=50) a tick lasts 100ms and a large std "
+                         "kicks the tip off-path before the next correction. A sim "
+                         "survival sweep put the usable ceiling at std~0.1 (log_std "
+                         "~-2.3) under the 480ms wheel lag; -1.0 (std 0.37, the old "
+                         "50 Hz value) dies immediately. Raise ~ln(5)=1.6 per 5x "
+                         "frequency increase.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--output", type=str, default=os.path.join(MODEL_DIR, "rl_policy.zip"))
     ap.add_argument("--no-eval", action="store_true", help="Skip the post-training quick eval")
@@ -197,8 +240,45 @@ def main():
         print(f"Warm-started policy mean network from {args.warm_start}")
 
     print(f"PPO on {args.num_envs} parallel env(s), {args.total_timesteps} timesteps, "
-          f"domain_rand={args.domain_rand}, obs_noise={args.obs_noise}")
-    model.learn(total_timesteps=args.total_timesteps)
+          f"domain_rand={args.domain_rand}, obs_noise={args.obs_noise}, "
+          f"v_max={args.v_max}, obs_delay={args.obs_delay}")
+
+    callback = None
+    if args.early_stop_at is not None:
+        from stable_baselines3.common.callbacks import BaseCallback
+
+        class SaveBestSuccess(BaseCallback):
+            """Keep the highest-success_rate checkpoint seen after --early-stop-at.
+
+            success_rate is a rolling mean over the VecMonitor episode buffer, so
+            it is only meaningful once enough episodes have accumulated; we start
+            watching at --early-stop-at rather than from step 0."""
+
+            def __init__(self, start_at, path):
+                super().__init__()
+                self.start_at, self.path, self.best = start_at, path, -1.0
+
+            def _on_step(self):
+                return True
+
+            def _on_rollout_end(self):
+                if self.num_timesteps < self.start_at:
+                    return
+                buf = self.model.ep_info_buffer
+                if not buf:
+                    return
+                rate = np.mean([e.get("is_success", 0.0) for e in buf])
+                if rate > self.best:
+                    self.best = rate
+                    self.model.save(self.path)
+                    print(f"  [best] success_rate {rate:.3f} @ {self.num_timesteps} "
+                          f"-> {os.path.basename(self.path)}")
+
+        best_path = os.path.splitext(args.output)[0] + "_best.zip"
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        callback = SaveBestSuccess(args.early_stop_at, best_path)
+
+    model.learn(total_timesteps=args.total_timesteps, callback=callback)
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     model.save(args.output)
@@ -210,6 +290,16 @@ def main():
     with open(config_path, "w") as f:
         json.dump(vars(args), f, indent=2)
     print(f"Saved run config to {config_path}")
+
+    # The best-success checkpoint is a separate .zip, so give it its own sibling
+    # config: v_max is resolved from the config next to the model file, and a
+    # missing one silently falls back to the module default.
+    if callback is not None and os.path.exists(callback.path):
+        best_config = os.path.splitext(callback.path)[0] + "_config.json"
+        with open(best_config, "w") as f:
+            json.dump(vars(args), f, indent=2)
+        print(f"Saved best-checkpoint config to {best_config} "
+              f"(best success_rate {callback.best:.3f})")
     vec_env.close()
 
     if not args.no_eval:

@@ -6,10 +6,17 @@ Usage:
     py -3.13 rl/evaluate_rl.py                  # all recorded signatures, plots only
     py -3.13 rl/evaluate_rl.py --view           # live MuJoCo window per signature
     py -3.13 rl/evaluate_rl.py --trajectory target_trajectory_20260710_111912.npz --view
+    py -3.13 rl/evaluate_rl.py --from-fit       # on the measured hardware plant
+
+IMPORTANT: the default plant is IDEAL (no wheel speed-loop lag), which flatters
+a policy badly - every checkpoint to date finishes on the ideal plant and aborts
+off-path under the measured lag. Pass --from-fit before believing any result, and
+set --frame-skip to the value in the policy's models/<name>_config.json.
 """
 
 import argparse
 import glob
+import json
 import os
 import sys
 
@@ -35,11 +42,38 @@ def main():
   ap.add_argument("--view", action="store_true",
                   help="Open a live MuJoCo viewer window while tracing")
   ap.add_argument("--max-time", type=float, default=60.0)
+  ap.add_argument("--frame-skip", type=int, default=50,
+                  help="Physics steps per policy action; MUST match the value the "
+                       "policy was trained at (see models/<name>_config.json)")
+  ap.add_argument("--vel-lag-tau", type=float, default=0.0,
+                  help="Wheel speed-loop time constant (s). 0 (default) evaluates on "
+                       "the IDEAL plant, which flatters the policy - pass the measured "
+                       "tau to see what hardware will actually do")
+  ap.add_argument("--vel-dead-time", type=float, default=0.0,
+                  help="Wheel speed-loop dead time (s); pair with --vel-lag-tau")
+  ap.add_argument("--from-fit", action="store_true",
+                  help="Take --vel-lag-tau/--vel-dead-time from the measured "
+                       "rl/deploy/sysid/sysid_fit_speed.json instead of the flags")
+  ap.add_argument("--obs-delay", type=int, default=0,
+                  help="Observation delay in control steps; match the policy's "
+                       "training value (see its _config.json)")
   args = ap.parse_args()
 
+  if args.from_fit:
+    fit_path = os.path.join(RL_DIR, "deploy", "sysid", "sysid_fit_speed.json")
+    with open(fit_path) as f:
+      fit = json.load(f)
+    args.vel_lag_tau, args.vel_dead_time = fit["tau_s"], fit["dead_s"]
+    print(f"Plant from {os.path.basename(fit_path)}: "
+          f"tau={args.vel_lag_tau:.3f}s dead={args.vel_dead_time:.3f}s")
+
   from stable_baselines3 import PPO
+  from signature_env import v_max_from_config
   model = PPO.load(args.model)
-  print(f"Loaded RL policy: {args.model}")
+  # Same rule as deployment: the speed ceiling comes from the policy's own run
+  # config, so a capped policy is not evaluated at the module default.
+  v_max = v_max_from_config(args.model)
+  print(f"Loaded RL policy: {args.model} (v_max={v_max:.3f} m/s)")
 
   if args.trajectory:
     files = [args.trajectory]
@@ -51,7 +85,11 @@ def main():
   for traj_path in files:
     name = os.path.splitext(os.path.basename(traj_path))[0]
     path_world = tt.load_path_world(traj_path)
-    env = SignatureEnv([path_world], init_xy_noise=0.0, init_yaw_noise=0.0,
+    env = SignatureEnv([path_world], frame_skip=args.frame_skip,
+                       init_xy_noise=0.0, init_yaw_noise=0.0,
+                       vel_lag_tau=args.vel_lag_tau,
+                       vel_dead_time=args.vel_dead_time,
+                       v_max=v_max, obs_delay_steps=args.obs_delay,
                        max_time=args.max_time)
     obs, _ = env.reset(seed=0)
 

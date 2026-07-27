@@ -18,6 +18,9 @@ closedloop_log_*.npz
 closedloop_trace_*.png
 tape_*.npz
 *_training_curves.png
+# Screen/camera recordings: tens of MB each, regenerable from a re-run
+*.gif
+*.mp4
 
 # Training runs / logs
 rl/runs/

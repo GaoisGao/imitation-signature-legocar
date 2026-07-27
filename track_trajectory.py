@@ -33,6 +33,7 @@ Usage:
 import argparse
 import glob
 import os
+from collections import deque
 
 import mujoco
 import numpy as np
@@ -49,6 +50,10 @@ SIM_TRACE_DIR = os.path.join(BASE_DIR, "datasets", "sim_traces")
 PLANE_WIDTH_MM = 199.0
 PLANE_HEIGHT_MM = 137.0
 
+# Feedforward (damping * target_omega) does the bulk of the work now, so the PI
+# only rejects the residual - the original small gains are kept because raising
+# them (esp. KI) drives the wheel-speed loop into oscillation that destabilizes
+# pure pursuit (see the gain sweep in rl/README / commit notes).
 WHEEL_VEL_KP = 0.004   # N*m per (rad/s) of wheel speed error
 WHEEL_VEL_KI = 0.002   # N*m per (rad/s * s) of accumulated error
 CTRL_LIMIT = 20.0      # clip on the raw ctrl (torque / gear) value
@@ -198,18 +203,31 @@ def free_joint_qpos_dof_adr(m: mujoco.MjModel, body_name: str):
 
 
 class WheelVelocityPI:
-    """Inner-loop PI controller: converts a target wheel angular velocity
+    """Inner-loop velocity controller: converts a target wheel angular velocity
     into a torque-actuator ctrl value (the motors are torque, not velocity,
-    actuators)."""
+    actuators).
 
-    def __init__(self, gear: float):
+    Feedforward + PI: the feedforward term `damping * target_omega` supplies the
+    torque needed to hold the target speed against the wheel's joint damping, so
+    the PI only has to reject the residual (ground rolling resistance, inertia
+    during transients). Without it, a pure-P controller settles at
+    KP/(KP+damping) of the target - the old KP=0.004 left a ~55% standing error
+    that the tiny KI took SECONDS to crawl out, so the sim wheel never actually
+    reached its commanded speed. The integral is anti-windup clamped so its
+    torque contribution can't exceed the actuator limit and stall recovery."""
+
+    def __init__(self, gear: float, damping: float = 0.0):
         self.gear = gear
+        self.damping = damping
         self.integral = 0.0
+        self._int_max = CTRL_LIMIT * gear / max(WHEEL_VEL_KI, 1e-9)  # |KI*int| <= limit
 
     def step(self, target_omega: float, actual_omega: float, dt: float) -> float:
         error = target_omega - actual_omega
         self.integral += error * dt
-        torque = WHEEL_VEL_KP * error + WHEEL_VEL_KI * self.integral
+        self.integral = float(np.clip(self.integral, -self._int_max, self._int_max))
+        torque = (self.damping * target_omega          # feedforward
+                  + WHEEL_VEL_KP * error + WHEEL_VEL_KI * self.integral)
         ctrl = torque / self.gear
         return float(np.clip(ctrl, -CTRL_LIMIT, CTRL_LIMIT))
 
@@ -247,7 +265,8 @@ class SignatureTracker:
                  speed: float = DEFAULT_SPEED, lookahead: float = DEFAULT_LOOKAHEAD,
                  finish_tol: float = DEFAULT_FINISH_TOL, path_spacing: float = DEFAULT_PATH_SPACING,
                  settle_steps: int = 300, controller=None, record: bool = False,
-                 init_xy_noise: float = 0.0, init_yaw_noise: float = 0.0, seed=None):
+                 init_xy_noise: float = 0.0, init_yaw_noise: float = 0.0, seed=None,
+                 vel_lag_tau: float = 0.0, vel_dead_time: float = 0.0):
         self.path_world = path_world
         self.speed = speed
         self.lookahead = lookahead
@@ -259,6 +278,19 @@ class SignatureTracker:
         self.init_xy_noise = init_xy_noise
         self.init_yaw_noise = init_yaw_noise
         self._rng = np.random.default_rng(seed)
+
+        # Firmware speed-loop emulation. The real SPIKE hub regulates a
+        # commanded wheel speed with its own internal loop that has a finite
+        # rise time; the sim's WheelVelocityPI is effectively instantaneous, so
+        # without this the sim tracks speed far faster than the robot. Model
+        # that loop as a pure dead time (vel_dead_time, s) followed by a
+        # first-order lag (vel_lag_tau, s) on the TARGET wheel speed before the
+        # PI, with both fitted by rl/deploy/motor_sysid.py. 0 = the original
+        # instantaneous behavior (expert/BC paths unchanged by default).
+        self.vel_lag_tau = float(vel_lag_tau)
+        self.vel_dead_time = float(vel_dead_time)
+        self._lag_omega = None            # filtered (target_left, target_right)
+        self._dead_buf = None             # deque of delayed (target_left, target_right)
 
         self.m = mujoco.MjModel.from_xml_path(model_path)
         self.d = mujoco.MjData(self.m)
@@ -278,8 +310,10 @@ class SignatureTracker:
         self.joint_to_actuator = build_joint_to_actuator_map(self.m)
         gear_left = float(self.m.actuator_gear[self.joint_to_actuator["joint_left"], 0])
         gear_right = float(self.m.actuator_gear[self.joint_to_actuator["joint_right"], 0])
-        self.pi_left = WheelVelocityPI(gear_left)
-        self.pi_right = WheelVelocityPI(gear_right)
+        damp_left = float(self.m.dof_damping[self.joint_left.dofadr[0]])
+        damp_right = float(self.m.dof_damping[self.joint_right.dofadr[0]])
+        self.pi_left = WheelVelocityPI(gear_left, damp_left)
+        self.pi_right = WheelVelocityPI(gear_right, damp_right)
 
         self.follower = PathFollower(path_world, lookahead)
         self.finished = False
@@ -376,6 +410,28 @@ class SignatureTracker:
         omega = float(np.clip(vy_local / self.tip_offset_x, -10.0, 10.0))
         return v, omega
 
+    def _apply_vel_lag(self, target_left: float, target_right: float, dt: float):
+        """Push a wheel-speed target through a pure dead time then a first-order
+        lag, emulating the hub's internal speed loop. Identity when both
+        vel_dead_time and vel_lag_tau are 0."""
+        tgt = np.array([target_left, target_right], dtype=np.float64)
+
+        if self.vel_dead_time > 0.0:
+            n = max(1, int(round(self.vel_dead_time / dt)))
+            if self._dead_buf is None or self._dead_buf.maxlen != n:
+                self._dead_buf = deque([tgt.copy()] * n, maxlen=n)
+            self._dead_buf.append(tgt.copy())
+            tgt = self._dead_buf[0]      # value from n steps ago
+
+        if self.vel_lag_tau > 0.0:
+            if self._lag_omega is None:
+                self._lag_omega = tgt.copy()
+            alpha = dt / (self.vel_lag_tau + dt)   # exact for a 1st-order lag
+            self._lag_omega += alpha * (tgt - self._lag_omega)
+            tgt = self._lag_omega
+
+        return float(tgt[0]), float(tgt[1])
+
     def step(self) -> bool:
         """Advances the simulation by one control step. Returns True once finished."""
         if self.finished:
@@ -417,6 +473,11 @@ class SignatureTracker:
         v_right_wheel = v - omega * self.wheel_right_y
         target_omega_left = v_left_wheel / self.wheel_radius
         target_omega_right = v_right_wheel / self.wheel_radius
+
+        # Emulate the hub speed loop's dead time + first-order rise on the wheel
+        # speed command (see __init__). No-ops when both params are 0.
+        target_omega_left, target_omega_right = self._apply_vel_lag(
+            target_omega_left, target_omega_right, dt)
 
         actual_omega_left = d.qvel[self.joint_left.dofadr[0]]
         actual_omega_right = d.qvel[self.joint_right.dofadr[0]]
