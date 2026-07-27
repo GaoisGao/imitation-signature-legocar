@@ -398,13 +398,14 @@ def load_policy_controller(policy_path):
     if ext == ".zip":
         sys.path.insert(0, os.path.join(BASE_DIR, "rl"))
         from stable_baselines3 import PPO
-        from signature_env import make_sb3_controller, v_max_from_config
+        from signature_env import make_sb3_controller, scales_from_config
         # Resolve V_MAX from the policy's own run config, not the module default:
         # a policy trained with a capped v_max would otherwise be run at up to
         # 2x its intended speed (see rl/TRAINING_LOG.md).
-        v_max = v_max_from_config(policy_path)
-        return (make_sb3_controller(PPO.load(policy_path), v_max=v_max),
-                f"RL (PPO, v_max={v_max:.3f} m/s)")
+        v_max, omega_max = scales_from_config(policy_path)
+        return (make_sb3_controller(PPO.load(policy_path), v_max=v_max,
+                                    omega_max=omega_max),
+                f"RL (PPO, v_max={v_max:.3f} m/s, omega_max={omega_max:.1f} rad/s)")
     raise SystemExit(f"Unknown policy type '{ext}' (expected .pt for BC or .zip for RL)")
 
 
@@ -735,12 +736,15 @@ def cmd_drive(args):
             else:
                 obs_m, target, at_end, dist_final = policy_obs_m(tip_mm, yaw, follower, path_mm)
                 v_m, omega = policy_controller(obs_m)
-                # m/s -> mm/s, optionally slowed. Scaling v AND omega by the same
-                # factor slows traversal while keeping the path shape (curvature
-                # = omega/v is unchanged) - useful when an RL policy is too
-                # aggressive for the 10 Hz loop it wasn't trained at.
+                # m/s -> mm/s, optionally slowed. --policy-speed-scale alone
+                # scales v AND omega together, preserving the path shape
+                # (curvature = omega/v unchanged). --policy-omega-scale then
+                # damps rotation ALONE, which does change the shape but is the
+                # lever for a policy whose angular output oscillates: capping
+                # v_max at training without capping OMEGA_MAX left rl_A with ~3x
+                # the angular authority per unit speed (rl/TRAINING_LOG.md).
                 v = v_m * 1000.0 * args.policy_speed_scale
-                omega = omega * args.policy_speed_scale
+                omega = omega * args.policy_speed_scale * args.policy_omega_scale
 
             # nearest-point tracking error (mm) for the abort test + logging
             err_mm = float(np.min(np.linalg.norm(path_mm - tip_mm, axis=1)))
@@ -903,6 +907,13 @@ def main():
                        help="Scale a --policy's (v, omega) output by this factor "
                             "(both, so the path shape is preserved). <1 slows an RL "
                             "policy that's too aggressive for the 10 Hz loop.")
+        p.add_argument("--policy-omega-scale", type=float, default=1.0,
+                       help="EXTRA scale on omega only, applied on top of "
+                            "--policy-speed-scale. Use when the policy's rotation "
+                            "chatters but its speed is already right: scaling both "
+                            "down fixes the chatter at the cost of halving traversal "
+                            "speed, which is what made rl_A slower AND less accurate "
+                            "than the policy it replaced. <1 damps rotation only.")
         p.add_argument("--lookahead", type=float, default=DEFAULT_LOOKAHEAD_MM,
                        help="Pure-pursuit lookahead, mm (default 12)")
         p.add_argument("--finish-tol", type=float, default=DEFAULT_FINISH_TOL_MM,

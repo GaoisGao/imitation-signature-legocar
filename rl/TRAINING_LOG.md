@@ -26,7 +26,9 @@ marked *(no log)*.
 | 4 | `PPO_2` | `rl_dr_10hz.zip` | 10 | ideal | -1.0 | **0.96** | best sim run ever; **fails under lag** |
 | 5 | `PPO_3` | `rl_10hz_lag.zip` | 10 | lag | -1.0 | **0.00** | dead on arrival — never finished one episode |
 | 6 | `PPO_4` | `rl_10hz_lag_v2.zip` | 10 | lag | **-2.5** | **0.89** | first to finish under lag (6/7, 4.68 mm) |
-| 7 | `PPO_5` | `rl_A_best.zip` | 10 | lag | -2.5 | 0.88 | speed cap + reward fix → **6/7, 3.54 mm** |
+| 7 | `PPO_5` | `rl_A_best.zip` | 10 | lag | -2.5 | 0.88 | speed cap + reward fix → **6/7, 3.54 mm**; **1.94 mm on hardware** at `--policy-omega-scale 0.25` |
+| 8 | `PPO_6` | `rl_B_best.zip` | 10 | lag+delay | -2.5 | 0.79 | obs-delay: mechanism works, estimate was too high (negative result) |
+| 9 | `PPO_7` | `rl_C.zip` | 10 | lag | -2.5 | *running* | `omega_max` capped at training instead of clamped at deploy |
 
 "Plant" = whether `vel_lag_tau`/`vel_dead_time` were active (the sysid-measured
 wheel speed-loop lag, τ=0.479 s, dead=0.063 s from
@@ -270,6 +272,90 @@ evaluated the policy 1.7× too fast** — reporting 4.36 mm instead of 3.54 mm.
 Fixed both ways: `v_max_from_config()` now falls back to the parent stem for
 `_best` checkpoints, and `train_rl.py` writes a sibling config next to the best
 checkpoint. **Always check the printed `v_max=...` line matches the run config.**
+
+## Run 8 (`PPO_6`) → `rl_B.zip` — observation delay (negative result)
+
+Run 7's config plus `--obs-delay 1`, justified by a measured **0.201 s (2.0 control
+ticks)** total loop delay — cross-correlating commanded ω against IMU yaw rate over
+8 hardware traces, corr 0.94-0.97, unanimous. Actuation dead time (0.063 s) is
+already modelled, so ~1 tick was attributed to sensing.
+
+Evaluated naively, B looks 40% worse than A (4.97 vs 3.54 mm mean). **That
+comparison is invalid** — it is the cross-plant error this document already warns
+about. The 2×2 on `..._160100`:
+
+| policy \ plant | no obs-delay | obs-delay 1 |
+| --- | --- | --- |
+| **A** (trained without) | 2.79 | 4.89 |
+| **B** (trained with) | 2.74 | **4.55** |
+
+Read down the columns: **within each plant B ≥ A**. Delay-robustness training
+worked. The delay itself costs ~75% accuracy for both policies, dwarfing any
+policy difference.
+
+**But the premise was wrong.** A, trained with no delay, predicted hardware well
+(3.54 mm sim → 3.3-4.0 mm real). If the robot truly had a full tick of sensing
+delay, A should have done markedly worse on the bench than its clean-plant sim
+said. It did not. The 0.201 s measurement is command→IMU-yaw, which lumps in
+actuation dynamics already modelled as `vel_lag_tau`; subtracting only the dead
+time over-attributed the remainder to sensing. **Real sensing delay is well under
+one tick — leave `--obs-delay 0`** until something measures it directly.
+
+Kept as a negative result: the mechanism works if ever needed, the estimate did not.
+
+---
+
+## Hardware ω sweep on Run 7 (2026-07-27) — and the v_max/omega_max coupling bug
+
+**Capping `v_max` without capping `OMEGA_MAX` is a bug.** Run 7 halved `v_max`
+0.06 → 0.035 and left `OMEGA_MAX` at 10.0, which **doubled the ω:v ratio available
+during training**. The policy learned to turn twice as hard per unit distance as
+the hardware can track. On the robot at full scale it oscillated to **7.0 mm RMS
+and aborted off-path** — worse than the policy it replaced, despite being 24%
+better in sim.
+
+`--policy-speed-scale 0.5` recovered stability but scales v *and* ω, halving an
+already-capped linear speed: 3.9 mm in 18 s. The fix was a new deploy flag,
+`--policy-omega-scale`, damping rotation alone at full speed:
+
+| ω-scale | rms | bias | std | bias share | mean \|ω\| | ω chatter | mean \|v\| |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1.0 | 7.00 | -1.67 | 6.79 | 6% | 0.79 | 0.490 | 12.4 (**abort**) |
+| 0.5 | 3.16 | -2.00 | 2.44 | 40% | 0.25 | 0.087 | 12.8 |
+| 0.4 | 2.87 | -1.93 | 2.13 | 45% | 0.23 | 0.057 | 11.6 |
+| 0.3 | 2.31 | -1.48 | 1.76 | 42% | 0.17 | 0.030 | 11.0 |
+| **0.25** | **1.94** | **-1.07** | **1.62** | **30%** | 0.15 | **0.022** | 10.3 |
+| pure pursuit | **1.53** | +0.47 | 1.34 | 11% | 0.29 | 0.030 | 17.2 |
+
+(chatter = mean |ω step-to-step change|, the oscillation measure.)
+
+**1.94 mm is the best RL result to date** — within 27% of the calibrated classical
+controller. Rotational smoothness is now *better* than pure pursuit's (0.022 vs
+0.030).
+
+**What the residual is.** Bias stays negative (tip inside the curve) and shrinks as
+ω is damped, while pure pursuit on the same calibrated robot sits at **+0.47 mm**.
+So the offset is the policy's, not the robot's, and it is an artifact of clamping:
+the policy requests a turn, receives 25% of it, under-turns, rides inside. Strip
+the bias and RL's random component is 1.62 vs pure pursuit's 1.34 — nearly equal.
+**The bias is essentially the whole remaining gap, and it exists only because ω is
+clamped after training rather than during it.**
+
+Hence `--omega-max` (Run 9). Deploy-time damping has hit its ceiling: chatter is
+already below the classical controller's, so there is nothing left for it to fix.
+
+### Calibration paid off, and moved the bar
+
+The systematic right-offset was real and is gone. Pure pursuit before: **1.76 mm
+RMS, bias -1.58 (81% systematic)**. After: **1.53 mm, bias +0.47 (11%)**. Note the
+bar moved *away* — calibration helps the classical controller more, because RL's
+error is dominated by policy behaviour rather than geometry.
+
+### Rule
+
+`v_max` and `omega_max` are a **pair**. Changing one alone changes the curvature
+the policy can command per unit distance, which is a different control problem.
+`scales_from_config()` now returns both together so they cannot drift apart.
 
 ---
 

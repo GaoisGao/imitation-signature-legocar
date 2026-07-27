@@ -110,7 +110,8 @@ class SignatureEnv(gym.Env):
                  completion_bonus: float = 30.0, off_path_penalty: float = 30.0,
                  off_path_limit_mm: float = 20.0, obs_noise_std: float = 0.0,
                  vel_lag_tau: float = 0.0, vel_dead_time: float = 0.0,
-                 v_max: float = V_MAX, obs_delay_steps: int = 0):
+                 v_max: float = V_MAX, omega_max: float = OMEGA_MAX,
+                 obs_delay_steps: int = 0):
         super().__init__()
         if not path_worlds:
             raise ValueError("path_worlds must contain at least one path")
@@ -143,6 +144,14 @@ class SignatureEnv(gym.Env):
         # DEPLOYMENT MUST USE THE SAME VALUE - it is recorded in the run config
         # json and read back by evaluate_rl.py / drive_closed_loop.py.
         self.v_max = float(v_max)
+        # Angular ceiling. Cap this WITH v_max, never alone: capping v_max at
+        # 0.035 while OMEGA_MAX stayed 10.0 doubled the omega:v ratio available
+        # during training, and the resulting policy oscillated on hardware
+        # (7.0 mm RMS, off-path abort). Damping omega afterwards with
+        # --policy-omega-scale recovers most of it (2.3 mm) but leaves a ~1.5 mm
+        # inward bias, because the policy under-turns relative to what it asked
+        # for. Capping here instead lets it learn the curvature it can achieve.
+        self.omega_max = float(omega_max)
         # Observation delay in CONTROL steps: the real loop sees the world
         # through camera exposure + blob detection + BLE, none of which the sim
         # had. At 10 Hz one step is already 100 ms, the same order as the wheel
@@ -209,7 +218,7 @@ class SignatureEnv(gym.Env):
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=np.float32).reshape(2), -1.0, 1.0)
-        self._cmd = (float(action[0] * self.v_max), float(action[1] * OMEGA_MAX))
+        self._cmd = (float(action[0] * self.v_max), float(action[1] * self.omega_max))
 
         finished = False
         for _ in range(self.frame_skip):
@@ -321,6 +330,32 @@ class SignatureEnv(gym.Env):
             mujoco.mj_step(m, d)
 
 
+def scales_from_config(model_path, v_default=V_MAX, om_default=OMEGA_MAX):
+    """(v_max, omega_max) a policy was trained with, from its run config.
+
+    Both must match at deployment: they set the action scaling, so a mismatch
+    silently rescales everything the policy commands."""
+    cfg = _find_config(model_path)
+    if cfg is None:
+        return float(v_default), float(om_default)
+    import json
+    with open(cfg) as f:
+        d = json.load(f)
+    return float(d.get("v_max", v_default)), float(d.get("omega_max", om_default))
+
+
+def _find_config(model_path):
+    """Config json for a model, falling back to the parent run for _best.zip."""
+    stem = os.path.splitext(model_path)[0]
+    cands = [stem + "_config.json"]
+    if stem.endswith("_best"):
+        cands.append(stem[:-len("_best")] + "_config.json")
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    return None
+
+
 def v_max_from_config(model_path, default=V_MAX):
     """Read the v_max a policy was trained with from its sibling _config.json.
 
@@ -343,7 +378,8 @@ def v_max_from_config(model_path, default=V_MAX):
     return float(default)
 
 
-def make_sb3_controller(model, v_max: float = V_MAX):
+def make_sb3_controller(model, v_max: float = V_MAX,
+                        omega_max: float = OMEGA_MAX):
     """Wraps a trained SB3 policy as a SignatureTracker `controller(raw_obs)
     -> (v, omega)` callable (the same hook learning/evaluate_bc.py uses), so
     evaluation and deployment reuse the exact training-time obs/action scaling."""
@@ -351,5 +387,5 @@ def make_sb3_controller(model, v_max: float = V_MAX):
         obs = (raw_obs / OBS_SCALE).astype(np.float32)
         action, _ = model.predict(obs, deterministic=True)
         action = np.clip(action, -1.0, 1.0)
-        return float(action[0] * v_max), float(action[1] * OMEGA_MAX)
+        return float(action[0] * v_max), float(action[1] * omega_max)
     return controller

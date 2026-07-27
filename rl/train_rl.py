@@ -26,7 +26,8 @@ import numpy as np
 import torch
 
 from signature_env import (ACTION_SCALE, OBS_SCALE, RL_DIR, PROJECT_DIR,
-                           SignatureEnv, V_MAX as DEFAULT_V_MAX)
+                           SignatureEnv, V_MAX as DEFAULT_V_MAX,
+                           OMEGA_MAX as DEFAULT_OMEGA_MAX)
 
 import track_trajectory as tt  # signature_env put PROJECT_DIR on sys.path
 import trajectory_io as tio
@@ -54,7 +55,8 @@ def make_env_fn(path_worlds, args, rank: int):
             off_path_limit_mm=args.off_path_limit_mm,
             obs_noise_std=args.obs_noise,
             vel_lag_tau=args.vel_lag_tau, vel_dead_time=args.vel_dead_time,
-            v_max=args.v_max, obs_delay_steps=args.obs_delay,
+            v_max=args.v_max, omega_max=args.omega_max,
+            obs_delay_steps=args.obs_delay,
             max_time=args.max_time)
         env.reset(seed=args.seed + rank)
         return env
@@ -106,7 +108,8 @@ def quick_eval(model, path_world, args, out_png: str):
     env = SignatureEnv([path_world], frame_skip=args.frame_skip,
                        init_xy_noise=0.0, init_yaw_noise=0.0,
                        vel_lag_tau=args.vel_lag_tau, vel_dead_time=args.vel_dead_time,
-                       v_max=args.v_max, obs_delay_steps=args.obs_delay,
+                       v_max=args.v_max, omega_max=args.omega_max,
+                       obs_delay_steps=args.obs_delay,
                        max_time=args.max_time)
     obs, _ = env.reset(seed=0)
     done = False
@@ -161,6 +164,14 @@ def main():
                          f"policy aborts mid-trace. Cap to ~0.035 so the whole action "
                          f"range is usable instead of scaling down at deploy time. "
                          f"Recorded in the run config and read back at deployment.")
+    ap.add_argument("--omega-max", type=float, default=DEFAULT_OMEGA_MAX,
+                    help=f"Angular ceiling, rad/s. CAP THIS WITH --v-max, never "
+                         f"alone: capping v_max at 0.035 while omega_max stayed "
+                         f"{DEFAULT_OMEGA_MAX} doubled the omega:v ratio and the policy "
+                         f"oscillated on hardware (7.0 mm, off-path abort). Damping "
+                         f"omega at deploy time recovers most of it but leaves a "
+                         f"~1.5 mm inward bias from under-turning; cap here instead. "
+                         f"Hardware tracks |omega| ~0.2 rad/s cleanly.")
     ap.add_argument("--obs-delay", type=int, default=0,
                     help="Observation delay in CONTROL steps: the policy sees the "
                          "state from N ticks ago, modelling camera exposure + blob "
@@ -241,7 +252,8 @@ def main():
 
     print(f"PPO on {args.num_envs} parallel env(s), {args.total_timesteps} timesteps, "
           f"domain_rand={args.domain_rand}, obs_noise={args.obs_noise}, "
-          f"v_max={args.v_max}, obs_delay={args.obs_delay}")
+          f"v_max={args.v_max}, omega_max={args.omega_max}, "
+          f"obs_delay={args.obs_delay}")
 
     callback = None
     if args.early_stop_at is not None:

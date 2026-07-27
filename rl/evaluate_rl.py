@@ -68,12 +68,13 @@ def main():
           f"tau={args.vel_lag_tau:.3f}s dead={args.vel_dead_time:.3f}s")
 
   from stable_baselines3 import PPO
-  from signature_env import v_max_from_config
+  from signature_env import scales_from_config
   model = PPO.load(args.model)
   # Same rule as deployment: the speed ceiling comes from the policy's own run
   # config, so a capped policy is not evaluated at the module default.
-  v_max = v_max_from_config(args.model)
-  print(f"Loaded RL policy: {args.model} (v_max={v_max:.3f} m/s)")
+  v_max, omega_max = scales_from_config(args.model)
+  print(f"Loaded RL policy: {args.model} "
+        f"(v_max={v_max:.3f} m/s, omega_max={omega_max:.1f} rad/s)")
 
   if args.trajectory:
     files = [args.trajectory]
@@ -89,7 +90,8 @@ def main():
                        init_xy_noise=0.0, init_yaw_noise=0.0,
                        vel_lag_tau=args.vel_lag_tau,
                        vel_dead_time=args.vel_dead_time,
-                       v_max=v_max, obs_delay_steps=args.obs_delay,
+                       v_max=v_max, omega_max=omega_max,
+                       obs_delay_steps=args.obs_delay,
                        max_time=args.max_time)
     obs, _ = env.reset(seed=0)
 
